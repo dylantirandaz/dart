@@ -639,7 +639,8 @@ if __name__ == "__main__":
     parser.add_argument("--num-steps", type=int, default=4,
                         help="Denoising steps T (4 for 16GB GPU, 16 for 80GB)")
     parser.add_argument("--save-every", type=int, default=5000)
-    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--workers", type=int, default=0,
+                        help="DataLoader workers (0 recommended on Windows)")
     parser.add_argument("--grad-checkpoint", action="store_true", default=True,
                         help="Enable gradient checkpointing (saves VRAM)")
     parser.add_argument("--no-grad-checkpoint", dest="grad_checkpoint", action="store_false")
