@@ -3,14 +3,17 @@
 //
 // Usage:
 //   dart generate --model-size xl --class 207 --steps 16 --cfg-scale 1.5
+//   dart generate --model-size small --steps 4   (dry-run with random weights)
+//   dart info --model-size xlarge
 
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use clap::{Parser, Subcommand};
 
-use dart::model::{DartConfig, DartModel};
 use dart::diffusion::DartSampler;
+use dart::model::{DartConfig, DartModel};
+use dart::vae;
 
 #[derive(Parser)]
 #[command(name = "dart", about = "DART image generation")]
@@ -43,9 +46,21 @@ enum Commands {
         #[arg(long, default_value_t = 1)]
         batch: usize,
 
-        /// Path to model weights (safetensors format).
+        /// Path to DART model weights (safetensors format).
         #[arg(long)]
         weights: Option<String>,
+
+        /// Path to VAE weights. If omitted, downloads SD v1.4 VAE from HuggingFace.
+        #[arg(long)]
+        vae_weights: Option<String>,
+
+        /// Output directory for generated images.
+        #[arg(long, default_value = "output")]
+        output_dir: String,
+
+        /// Skip VAE decoding (output raw patches only).
+        #[arg(long, default_value_t = false)]
+        no_decode: bool,
     },
 
     /// Print model configuration and architecture info.
@@ -89,7 +104,6 @@ fn main() -> Result<()> {
             println!("  AdaLN:        {}", config.use_adaln);
             println!("  SwiGLU:       {}", config.use_swiglu);
 
-            // Show noise schedule
             let schedule = dart::diffusion::CosineSchedule::new(config.num_steps);
             println!("\nCosine noise schedule (gamma_t):");
             for (i, g) in schedule.gamma.iter().enumerate() {
@@ -105,6 +119,9 @@ fn main() -> Result<()> {
             cfg_scale,
             batch,
             weights,
+            vae_weights,
+            output_dir,
+            no_decode,
         } => {
             let config = get_config(&model_size, steps)?;
             let device = Device::Cpu;
@@ -116,40 +133,68 @@ fn main() -> Result<()> {
             println!("  CFG scale: {cfg_scale}");
             println!("  Batch:     {batch}");
 
-            if let Some(ref path) = weights {
+            // Load or initialize DART model
+            let model = if let Some(ref path) = weights {
                 println!("  Weights:   {path}");
                 let vb = unsafe {
                     VarBuilder::from_mmaped_safetensors(&[path], DType::F32, &device)?
                 };
-                let model = DartModel::new(config.clone(), vb)?;
-                let sampler = DartSampler::new(config.num_steps);
-
-                let class_ids = Tensor::full(class, batch, &device)?;
-
-                println!("\nSampling...");
-                let output = sampler.sample(&model, &class_ids, cfg_scale, &device)?;
-                let (b, k, pd) = output.dims3()?;
-                println!("  Output: ({b}, {k}, {pd})");
-                println!("  Done. Output contains VAE latent patches.");
-                println!("  Decode with the SD v1.4 VAE to get pixel images.");
+                DartModel::new(config.clone(), vb)?
             } else {
-                println!("  Weights:   (none -- dry run with random init)");
-                println!("\nInitializing model with random weights...");
-
+                println!("  Weights:   (random init -- dry run)");
                 let var_map = candle_nn::VarMap::new();
                 let vb = VarBuilder::from_varmap(&var_map, DType::F32, &device);
-                let model = DartModel::new(config.clone(), vb)?;
+                DartModel::new(config.clone(), vb)?
+            };
 
-                let sampler = DartSampler::new(config.num_steps);
-                let class_ids = Tensor::full(class, batch, &device)?;
+            // Run sampling
+            let sampler = DartSampler::new(config.num_steps);
+            let class_ids = Tensor::full(class, batch, &device)?;
 
-                println!("Running {steps}-step sampling (random weights -- output is noise)...");
-                let output = sampler.sample(&model, &class_ids, cfg_scale, &device)?;
-                let (b, k, pd) = output.dims3()?;
-                println!("  Output shape: ({b}, {k}, {pd})");
-                println!("  Patch dim: {pd} = {}x{}x{}", config.patch_size, config.patch_size, config.vae_channels);
-                println!("\n  Architecture verified. Provide --weights <path> for real generation.");
+            println!("\nSampling ({steps} denoising steps)...");
+            let patches = sampler.sample(&model, &class_ids, cfg_scale, &device)?;
+            let (b, k, pd) = patches.dims3()?;
+            println!("  Patches: ({b}, {k}, {pd})");
+
+            if no_decode || weights.is_none() {
+                if weights.is_none() {
+                    println!("\n  Architecture verified (random weights).");
+                    println!("  Provide --weights <path> for real generation.");
+                } else {
+                    println!("  Skipping VAE decode (--no-decode).");
+                }
+                return Ok(());
             }
+
+            // Load VAE
+            let vae_path = if let Some(ref p) = vae_weights {
+                println!("  VAE:       {p}");
+                p.clone()
+            } else {
+                println!("  Downloading SD v1.4 VAE from HuggingFace...");
+                let path = vae::download_vae_weights()?;
+                let p = path.to_string_lossy().to_string();
+                println!("  VAE:       {p}");
+                p
+            };
+
+            let vae_model = vae::load_vae(&vae_path, &device)?;
+
+            // Decode patches to images
+            println!("  Decoding latents to pixels...");
+            let pixels = vae::patches_to_pixels(&patches, &config, &vae_model)?;
+            let (b, c, h, w) = pixels.dims4()?;
+            println!("  Pixels: ({b}, {c}, {h}, {w})");
+
+            // Save images
+            std::fs::create_dir_all(&output_dir)?;
+            for i in 0..b {
+                let img_tensor = pixels.get(i)?; // (3, H, W)
+                let path = format!("{output_dir}/dart_class{class}_{i:03}.png");
+                vae::save_image(&img_tensor, &path)?;
+            }
+
+            println!("\nDone. Generated {b} image(s) in {output_dir}/");
         }
     }
 
