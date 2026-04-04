@@ -249,46 +249,54 @@ def unpatchify(patches, patch_size=2, channels=4):
 @torch.no_grad()
 def sample(model, schedule, num_classes, num_steps, num_tokens, class_ids,
            cfg_scale=1.0, device="cuda"):
-    """DART non-Markovian sampling. Returns (B, K, patch_dim) clean patches."""
+    """DART non-Markovian sampling (Algorithm 2 from §3.2).
+
+    Uses growing sequences: start with x_T, iteratively sample x_{T-1}..x_0.
+    Each step conditions on all previously denoised blocks (non-Markovian).
+    """
     model.eval()
     B = class_ids.shape[0]
 
-    # Initialize all T levels with pure noise
-    x_levels = [torch.randn(B, num_tokens, PATCH_DIM, device=device)
-                for _ in range(num_steps)]
+    # Initialize x_T ~ N(0, I)
+    x_T = torch.randn(B, num_tokens, PATCH_DIM, device=device)
 
-    for i in range(num_steps):
-        current_step = num_steps - i   # T, T-1, ..., 1
-        target_step = current_step - 1  # T-1, ..., 0
-        num_blocks = num_steps - i
+    # Growing sequence: [x_t, x_{t+1}, ..., x_T]
+    # Position 0 = current step (cleanest), last position = x_T (noisiest)
+    # This matches training where position 0 = step 1 (cleanest)
+    blocks = [x_T]
 
-        # Concatenate remaining noisy levels: x_{t:T}
-        x_partial = torch.cat(x_levels[i:], dim=1)
-        mask = build_blockwise_causal_mask(num_blocks, num_tokens, device)
+    for step_idx in range(num_steps):
+        t = num_steps - step_idx   # T, T-1, ..., 1
 
-        # Model prediction (with AMP)
+        x_seq = torch.cat(blocks, dim=1)
+        mask = build_blockwise_causal_mask(len(blocks), num_tokens, device)
+
         with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
-            v_pred = model(x_partial, class_ids, mask)[:, :num_tokens, :]
+            v_pred = model(x_seq, class_ids, mask)[:, :num_tokens, :]
 
             if cfg_scale > 1.0:
                 uncond_ids = torch.full_like(class_ids, num_classes)
-                v_uncond = model(x_partial, uncond_ids, mask)[:, :num_tokens, :]
+                v_uncond = model(x_seq, uncond_ids, mask)[:, :num_tokens, :]
                 v_pred = v_uncond + cfg_scale * (v_pred - v_uncond)
 
         # v-prediction → x̂_0: x̂_0 = α_t · x_t − σ_t · v̂_t
-        alpha = schedule.alpha_bar[current_step].to(device)
-        sigma = schedule.sqrt_one_minus_gamma[current_step].to(device)
-        x0_pred = alpha * x_levels[i] - sigma * v_pred
+        alpha = schedule.alpha_bar[t].to(device)
+        sigma = schedule.sqrt_one_minus_gamma[t].to(device)
+        x0_pred = alpha * blocks[0] - sigma * v_pred
 
-        if target_step == 0:
-            x_levels[i] = x0_pred
-        else:
-            sg = schedule.sqrt_gamma[target_step].to(device)
-            sng = schedule.sqrt_one_minus_gamma[target_step].to(device)
-            x_levels[i] = sg * x0_pred + sng * torch.randn_like(x0_pred)
+        if t == 1:
+            model.train()
+            return x0_pred
+
+        # Sample x_{t-1} and prepend to sequence
+        target = t - 1
+        sg = schedule.sqrt_gamma[target].to(device)
+        sng = schedule.sqrt_one_minus_gamma[target].to(device)
+        x_prev = sg * x0_pred + sng * torch.randn_like(x0_pred)
+        blocks = [x_prev] + blocks  # Prepend: [x_{t-1}, x_t, ..., x_T]
 
     model.train()
-    return x_levels[0]
+    return x0_pred
 
 
 @torch.no_grad()

@@ -31,7 +31,10 @@ impl DartSampler {
         }
     }
 
-    /// §3.2 — Run the full DART sampling loop.
+    /// §3.2, Algorithm 2 — Run the full DART sampling loop.
+    ///
+    /// Uses growing sequences: start with x_T, iteratively sample x_{T-1}..x_0.
+    /// Each step conditions on all previously denoised blocks (non-Markovian).
     ///
     /// # Arguments
     /// * `model` — The DART transformer model.
@@ -54,70 +57,58 @@ impl DartSampler {
         let patch_dim = config.patch_dim();
         let t_steps = config.num_steps;
 
-        // Step 1: Initialize x_T ~ N(0, I)
-        // We store all T noise levels. Index 0 = step T (noisiest), index T-1 = step 1.
-        let mut x_levels: Vec<Tensor> = Vec::with_capacity(t_steps);
-        for _ in 0..t_steps {
-            let noise = Tensor::randn(0f32, 1f32, (batch, k, patch_dim), device)?;
-            x_levels.push(noise);
-        }
+        // Initialize x_T ~ N(0, I)
+        let x_t = Tensor::randn(0f32, 1f32, (batch, k, patch_dim), device)?;
 
-        // Step 2: Denoise from t=T down to t=1
-        // At iteration i, we denoise step (T - i) using steps (T-i)..T
-        for i in 0..t_steps {
-            let current_step = t_steps - i; // t = T, T-1, ..., 1
-            let target_step = current_step - 1; // t-1 = T-1, T-2, ..., 0
+        // Growing sequence: [x_t, x_{t+1}, ..., x_T]
+        // Position 0 = current step (cleanest), last = x_T (noisiest)
+        let mut blocks: Vec<Tensor> = vec![x_t];
 
-            // Gather x_{t:T} — that's x_levels[i..] in our storage
-            // (from current noisiest remaining to the initial T)
-            let partial_levels: Vec<&Tensor> = x_levels[i..].iter().collect();
-            let x_partial = Tensor::cat(&partial_levels, 1)?; // (B, (T-i)*K, patch_dim)
+        let mut x0_pred = blocks[0].clone(); // will be overwritten
 
-            // Run model to get prediction for the cleanest chunk
+        for step_idx in 0..t_steps {
+            let t = t_steps - step_idx; // T, T-1, ..., 1
+
+            // Concatenate growing sequence
+            let block_refs: Vec<&Tensor> = blocks.iter().collect();
+            let x_seq = Tensor::cat(&block_refs, 1)?;
+
+            // Run model on partial sequence
+            let num_blocks = blocks.len();
             let pred = if cfg_scale > 1.0 + 1e-6 {
-                // Classifier-free guidance: run conditional and unconditional
-                let cond_pred = model.forward_step(&x_partial, class_ids, i)?;
-
+                let cond_pred = model.forward_step(&x_seq, class_ids, num_blocks)?;
                 let uncond_ids = Tensor::full(
                     config.num_classes as u32,
                     class_ids.shape(),
                     device,
                 )?;
-                let uncond_pred = model.forward_step(&x_partial, &uncond_ids, i)?;
-
-                // §4.1 — CFG: pred = uncond + scale * (cond - uncond)
+                let uncond_pred = model.forward_step(&x_seq, &uncond_ids, num_blocks)?;
                 let diff = (&cond_pred - &uncond_pred)?;
                 (uncond_pred + diff * cfg_scale)?
             } else {
-                model.forward_step(&x_partial, class_ids, i)?
+                model.forward_step(&x_seq, class_ids, num_blocks)?
             };
-            // pred: (B, K, patch_dim) — the model's x̂_0 prediction
 
-            // §B.3 — v-prediction: convert model output to x̂_0
-            // x̂_0 = α_t · x_t - σ_t · v̂_t
-            let alpha = self.schedule.alpha_bar[current_step] as f32;
-            let sigma = self.schedule.sqrt_one_minus_gamma[current_step] as f32;
-            let x_t_chunk = &x_levels[i].narrow(1, 0, k)?;
-            let x0_pred = ((x_t_chunk * alpha as f64)? - (pred * sigma as f64)?)?;
+            // v-prediction → x̂_0: x̂_0 = α_t · x_t − σ_t · v̂_t
+            let alpha = self.schedule.alpha_bar[t];
+            let sigma = self.schedule.sqrt_one_minus_gamma[t];
+            x0_pred = ((&blocks[0] * alpha)? - (pred * sigma)?)?;
 
-            if target_step == 0 {
-                // Final step: x_0 = x̂_0 (no noise added)
-                x_levels[i] = x0_pred;
-            } else {
-                // §3.2 — Sample x_{t-1} = √γ_{t-1} · x̂_0 + √(1-γ_{t-1}) · ε
-                let (sqrt_g, sqrt_1mg) = self.schedule.add_noise_params(target_step);
-                let noise = Tensor::randn(0f32, 1f32, (batch, k, patch_dim), device)?;
-                let x_prev =
-                    ((x0_pred * sqrt_g)? + (noise * sqrt_1mg)?)?;
-
-                // Store the denoised result. We insert it before the current position
-                // so that x_levels[i] now holds x_{t-1}
-                x_levels[i] = x_prev;
+            if t == 1 {
+                break; // Final step: return x̂_0
             }
+
+            // Sample x_{t-1} = √γ_{t-1} · x̂_0 + √(1-γ_{t-1}) · ε
+            let target = t - 1;
+            let (sqrt_g, sqrt_1mg) = self.schedule.add_noise_params(target);
+            let noise = Tensor::randn(0f32, 1f32, (batch, k, patch_dim), device)?;
+            let x_prev = ((x0_pred.clone() * sqrt_g)? + (noise * sqrt_1mg)?)?;
+
+            // Prepend x_{t-1} to form [x_{t-1}, x_t, ..., x_T]
+            blocks.insert(0, x_prev);
         }
 
-        // Return x_0 — stored in x_levels[0] after the final iteration
-        Ok(x_levels[0].clone())
+        Ok(x0_pred)
     }
 
     pub fn schedule(&self) -> &CosineSchedule {
