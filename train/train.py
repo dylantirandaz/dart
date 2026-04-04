@@ -464,15 +464,42 @@ def train(args):
     model.train()
     global_step = 0
     scaler = torch.amp.GradScaler("cuda") if device.type == "cuda" else None
+
+    # Resume from checkpoint
+    if args.resume:
+        pt_path = args.resume
+        print(f"Resuming from {pt_path}...")
+        ckpt = torch.load(pt_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model"])
+        optimizer.load_state_dict(ckpt["optimizer"])
+        if ckpt.get("scheduler"):
+            scheduler.load_state_dict(ckpt["scheduler"])
+        if scaler and ckpt.get("scaler"):
+            scaler.load_state_dict(ckpt["scaler"])
+        ema_state = {k: v.to(device) for k, v in ckpt["ema"].items()}
+        global_step = ckpt["global_step"]
+        print(f"  Resumed at step {global_step}")
+
     start_time = time.time()
+
+    # Compute starting epoch when resuming
+    batches_per_epoch = len(loader)
+    steps_per_epoch = batches_per_epoch // accum_steps
+    start_epoch = global_step // steps_per_epoch if steps_per_epoch > 0 else 0
+    start_batch = (global_step % steps_per_epoch) * accum_steps if steps_per_epoch > 0 else 0
 
     print(f"\nTraining for {total_steps} steps...")
     print(f"  Warmup: {warmup_steps} steps")
     print(f"  Save every: {args.save_every} steps")
+    if global_step > 0:
+        print(f"  Resuming from step {global_step} (epoch {start_epoch})")
     print()
 
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         for batch_idx, (images, labels) in enumerate(loader):
+            # Skip batches already completed in the resume epoch
+            if epoch == start_epoch and batch_idx < start_batch:
+                continue
             if args.steps and global_step >= args.steps:
                 break
 
@@ -547,7 +574,8 @@ def train(args):
                           f"{steps_per_sec:.1f} it/s | ETA {eta/60:.0f}m")
 
                 if global_step % args.save_every == 0:
-                    save_checkpoint(ema_state, args.output_dir, global_step, args.size)
+                    save_checkpoint(ema_state, args.output_dir, global_step, args.size,
+                                    model, optimizer, scheduler, scaler)
 
                 if args.sample_every and global_step % args.sample_every == 0:
                     img_path = os.path.join(args.output_dir, f"samples_step{global_step}.png")
@@ -566,16 +594,34 @@ def train(args):
             break
         print(f"Epoch {epoch+1}/{args.epochs} done ({global_step} steps)")
 
-    save_checkpoint(ema_state, args.output_dir, global_step, args.size)
+    save_checkpoint(ema_state, args.output_dir, global_step, args.size,
+                    model, optimizer, scheduler, scaler)
     elapsed = time.time() - start_time
     print(f"\nTraining complete. {global_step} steps in {elapsed/60:.1f} minutes.")
 
 
-def save_checkpoint(ema_state, output_dir, step, size):
-    state = {k: v.cpu().contiguous() for k, v in ema_state.items()}
-    path = os.path.join(output_dir, f"dart_{size}_step{step}.safetensors")
-    save_file(state, path)
-    print(f"  Saved: {path}")
+def save_checkpoint(ema_state, output_dir, step, size, model=None,
+                    optimizer=None, scheduler=None, scaler=None):
+    """Save EMA weights (safetensors for inference) + full training state (.pt for resume)."""
+    # Inference weights (safetensors)
+    ema_cpu = {k: v.cpu().contiguous() for k, v in ema_state.items()}
+    st_path = os.path.join(output_dir, f"dart_{size}_step{step}.safetensors")
+    save_file(ema_cpu, st_path)
+    print(f"  Saved: {st_path}")
+
+    # Full training state for resume
+    if model is not None and optimizer is not None:
+        train_state = {
+            "global_step": step,
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict() if scheduler else None,
+            "scaler": scaler.state_dict() if scaler else None,
+            "ema": ema_state,
+        }
+        pt_path = os.path.join(output_dir, f"dart_{size}_latest.pt")
+        torch.save(train_state, pt_path)
+        print(f"  Saved: {pt_path}")
 
 
 if __name__ == "__main__":
@@ -601,6 +647,8 @@ if __name__ == "__main__":
                         help="Generate sample images every N steps (0 to disable)")
     parser.add_argument("--cfg-scale", type=float, default=1.5,
                         help="Classifier-free guidance scale for sampling")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path to .pt checkpoint to resume training from")
     args = parser.parse_args()
 
     if args.dataset == "folder" and args.data_dir is None:
