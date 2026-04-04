@@ -42,6 +42,10 @@ enum Commands {
         #[arg(long, default_value_t = 1.5)]
         cfg_scale: f64,
 
+        /// Number of classes (10 for CIFAR-10, 1000 for ImageNet).
+        #[arg(long, default_value_t = 1000)]
+        num_classes: usize,
+
         /// Batch size (number of images to generate).
         #[arg(long, default_value_t = 1)]
         batch: usize,
@@ -117,13 +121,15 @@ fn main() -> Result<()> {
             class,
             steps,
             cfg_scale,
+            num_classes,
             batch,
             weights,
             vae_weights,
             output_dir,
             no_decode,
         } => {
-            let config = get_config(&model_size, steps)?;
+            let mut config = get_config(&model_size, steps)?;
+            config.num_classes = num_classes;
             let device = Device::Cpu;
 
             println!("DART Generation");

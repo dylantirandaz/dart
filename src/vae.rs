@@ -47,19 +47,9 @@ pub fn load_vae(weights_path: &str, device: &Device) -> Result<AutoEncoderKL> {
 ///
 /// DART outputs (B, K, patch_dim) where:
 ///   K = (H_latent / patch_size) * (W_latent / patch_size)  = 256 for 256x256 images
-///   patch_dim = patch_size^2 * vae_channels = 2*2*16 = 64
+///   patch_dim = patch_size^2 * vae_channels = 2*2*4 = 16
 ///
 /// This function rearranges patches back to (B, vae_channels, H_latent, W_latent).
-///
-/// However, the SD v1.4 VAE has latent_channels=4 (not 16). The paper (§B.1) says
-/// "VAE Latent Channels: 16" which likely means they use a different VAE or the
-/// VAE's spatial latent is 16-channel before the quant_conv projects to 4.
-///
-/// For the standard SD v1.4 VAE with 4 latent channels:
-///   256x256 image -> 32x32 latent (8x downsampling) with 4 channels
-///   Patchified with patch_size=2: 16x16 = 256 tokens, each 2*2*4 = 16 dims
-///
-/// We handle both cases based on the config's vae_channels.
 pub fn unpatchify(
     patches: &Tensor,
     config: &DartConfig,
@@ -96,7 +86,7 @@ pub fn patches_to_pixels(
     let latent_h = 32;
     let latent_w = 32;
 
-    // Unpatchify: (B, 256, 64) -> (B, C, 32, 32)
+    // Unpatchify: (B, 256, 16) -> (B, 4, 32, 32)
     let latents = unpatchify(patches, config, latent_h, latent_w)?;
 
     // If config uses 16 channels but VAE expects 4, we need to handle the mismatch.

@@ -32,46 +32,35 @@ impl RmsNorm {
 // Rotary Position Embeddings (§B.1: axes [16, 24, 24])
 // ---------------------------------------------------------------------------
 
-/// Precompute RoPE frequency tensors for the given axes dimensions.
-/// §B.1 — "Rotary Position Embeddings with rope_axes_dim = [16, 24, 24]"
-/// The 3 axes correspond to (denoising_step, spatial_h, spatial_w).
+/// Precompute flat RoPE frequency tensors matching PyTorch training implementation.
+/// Uses total head_dim (sum of rope_axes_dim) as a single flat dimension.
 pub fn build_rope_cache(
     seq_len: usize,
     axes_dim: &[usize; 3],
     device: &Device,
 ) -> Result<(Tensor, Tensor)> {
-    let mut all_cos = Vec::new();
-    let mut all_sin = Vec::new();
+    let total_dim: usize = axes_dim.iter().sum();
+    let half = total_dim / 2;
 
-    // For each axis, compute sinusoidal frequencies
-    for &dim in axes_dim.iter() {
-        let half = dim / 2;
-        let theta: Vec<f32> = (0..half)
-            .map(|i| 1.0 / 10000f32.powf(2.0 * i as f32 / dim as f32))
-            .collect();
-        let theta = Tensor::from_vec(theta, half, device)?;
-        let positions: Vec<f32> = (0..seq_len).map(|p| p as f32).collect();
-        let positions = Tensor::from_vec(positions, seq_len, device)?;
+    // inv_freq = 1 / 10000^(2i / total_dim) for i in 0..half
+    let theta: Vec<f32> = (0..half)
+        .map(|i| 1.0 / 10000f32.powf(2.0 * i as f32 / total_dim as f32))
+        .collect();
+    let theta = Tensor::from_vec(theta, half, device)?;
+    let positions: Vec<f32> = (0..seq_len).map(|p| p as f32).collect();
+    let positions = Tensor::from_vec(positions, seq_len, device)?;
 
-        // (seq_len, half)
-        let freqs = positions
-            .unsqueeze(1)?
-            .broadcast_mul(&theta.unsqueeze(0)?)?;
+    // (seq_len, half)
+    let freqs = positions
+        .unsqueeze(1)?
+        .broadcast_mul(&theta.unsqueeze(0)?)?;
 
-        let cos = freqs.cos()?;
-        let sin = freqs.sin()?;
+    let cos = freqs.cos()?;
+    let sin = freqs.sin()?;
 
-        // Duplicate for full dim: (seq_len, dim)
-        let cos = Tensor::cat(&[&cos, &cos], 1)?;
-        let sin = Tensor::cat(&[&sin, &sin], 1)?;
-
-        all_cos.push(cos);
-        all_sin.push(sin);
-    }
-
-    // Concatenate across all axes: (seq_len, total_dim)
-    let cos = Tensor::cat(&all_cos.iter().collect::<Vec<_>>(), 1)?;
-    let sin = Tensor::cat(&all_sin.iter().collect::<Vec<_>>(), 1)?;
+    // Duplicate to full dim: (seq_len, total_dim) — matches Python's cat([freqs, freqs])
+    let cos = Tensor::cat(&[&cos, &cos], 1)?;
+    let sin = Tensor::cat(&[&sin, &sin], 1)?;
 
     Ok((cos, sin))
 }
@@ -153,8 +142,8 @@ pub struct Attention {
 impl Attention {
     pub fn new(config: &DartConfig, vb: VarBuilder) -> Result<Self> {
         let total_dim = config.num_heads * config.head_dim;
-        let qkv = nn::linear(config.hidden_size, 3 * total_dim, vb.pp("qkv"))?;
-        let out_proj = nn::linear(total_dim, config.hidden_size, vb.pp("out_proj"))?;
+        let qkv = nn::linear_no_bias(config.hidden_size, 3 * total_dim, vb.pp("qkv"))?;
+        let out_proj = nn::linear_no_bias(total_dim, config.hidden_size, vb.pp("out_proj"))?;
 
         // §B.1 — "per-head RMSNorm applied"
         let q_norm = RmsNorm::new(config.head_dim, vb.pp("q_norm"))?;
@@ -252,9 +241,9 @@ pub struct SwiGluFfn {
 impl SwiGluFfn {
     pub fn new(config: &DartConfig, vb: VarBuilder) -> Result<Self> {
         let ffn_dim = config.ffn_hidden_size();
-        let w1 = nn::linear(config.hidden_size, ffn_dim, vb.pp("w1"))?;
-        let w2 = nn::linear(ffn_dim, config.hidden_size, vb.pp("w2"))?;
-        let w3 = nn::linear(config.hidden_size, ffn_dim, vb.pp("w3"))?;
+        let w1 = nn::linear_no_bias(config.hidden_size, ffn_dim, vb.pp("w1"))?;
+        let w2 = nn::linear_no_bias(ffn_dim, config.hidden_size, vb.pp("w2"))?;
+        let w3 = nn::linear_no_bias(config.hidden_size, ffn_dim, vb.pp("w3"))?;
         Ok(Self { w1, w2, w3 })
     }
 

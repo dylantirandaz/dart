@@ -16,7 +16,7 @@ pub struct DartConfig {
     pub head_dim: usize,
     /// Total model parameters (approximate, for reference).
     pub num_params_m: f64,
-    /// VAE latent channels (§B.1: 16 for SD v1.4 VAE).
+    /// VAE latent channels (SD v1.4 VAE: 4 latent channels).
     pub vae_channels: usize,
     /// Patch size for patchifying VAE latents (§B.1: 2).
     pub patch_size: usize,
@@ -45,7 +45,7 @@ impl DartConfig {
             num_heads: 6,
             head_dim: 64,
             num_params_m: 48.0,
-            vae_channels: 16,
+            vae_channels: 4,
             patch_size: 2,
             num_steps: 16,
             num_tokens: 256,
