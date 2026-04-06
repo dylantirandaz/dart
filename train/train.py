@@ -520,6 +520,7 @@ def train(args):
         print(f"  Resumed at step {global_step}")
 
     start_time = time.time()
+    resume_step = global_step
 
     # Compute starting epoch when resuming
     batches_per_epoch = len(loader)
@@ -601,7 +602,8 @@ def train(args):
 
                 if global_step % 50 == 0:
                     elapsed = time.time() - start_time
-                    steps_per_sec = global_step / elapsed
+                    steps_done = global_step - resume_step
+                    steps_per_sec = steps_done / max(elapsed, 1e-6)
                     lr = scheduler.get_last_lr()[0]
                     real_loss = loss.item() * accum_steps
                     eta = (total_steps - global_step) / max(steps_per_sec, 0.01)
