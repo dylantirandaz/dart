@@ -312,7 +312,7 @@ def sample(model, schedule, num_classes, num_steps, num_tokens, class_ids,
         # step_offset aligns RoPE positions with training layout
         step_offset = t - 1
 
-        with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
             v_pred = model(x_seq, class_ids, mask, step_offset)[:, :num_tokens, :]
 
             if cfg_scale > 1.0:
@@ -504,7 +504,7 @@ def train(args):
     # Training loop
     model.train()
     global_step = 0
-    scaler = torch.amp.GradScaler("cuda") if device.type == "cuda" else None
+    use_amp = device.type == "cuda"
 
     # Resume from checkpoint
     if args.resume:
@@ -515,8 +515,6 @@ def train(args):
         optimizer.load_state_dict(ckpt["optimizer"])
         if ckpt.get("scheduler"):
             scheduler.load_state_dict(ckpt["scheduler"])
-        if scaler and ckpt.get("scaler"):
-            scaler.load_state_dict(ckpt["scaler"])
         ema_state = {k: v.to(device) for k, v in ckpt["ema"].items()}
         global_step = ckpt["global_step"]
         print(f"  Resumed at step {global_step}")
@@ -574,33 +572,22 @@ def train(args):
             x_input = torch.cat(all_noisy, dim=1)
             v_targets = torch.cat(all_targets, dim=1)
 
-            # Forward + loss
-            with torch.amp.autocast("cuda", enabled=scaler is not None):
+            # Forward + loss (bf16: same dynamic range as fp32, no scaler needed)
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=use_amp):
                 v_pred = model(x_input, labels, mask)
                 loss = F.mse_loss(v_pred, v_targets) / accum_steps
 
             # Skip NaN losses to prevent poisoning weights
             if torch.isnan(loss) or torch.isinf(loss):
                 optimizer.zero_grad()
-                if scaler:
-                    scaler.update()
                 continue
 
-            if scaler:
-                scaler.scale(loss).backward()
-            else:
-                loss.backward()
+            loss.backward()
 
             # Step optimizer every accum_steps
             if (batch_idx + 1) % accum_steps == 0:
-                if scaler:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 2.0)
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 2.0)
-                    optimizer.step()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 2.0)
+                optimizer.step()
                 optimizer.zero_grad()
                 scheduler.step()
 
@@ -624,7 +611,7 @@ def train(args):
 
                 if global_step % args.save_every == 0:
                     save_checkpoint(ema_state, args.output_dir, global_step, args.size,
-                                    model, optimizer, scheduler, scaler)
+                                    model, optimizer, scheduler)
 
                 if args.sample_every and global_step % args.sample_every == 0:
                     img_path = os.path.join(args.output_dir, f"samples_step{global_step}.png")
@@ -644,13 +631,13 @@ def train(args):
         print(f"Epoch {epoch+1}/{args.epochs} done ({global_step} steps)")
 
     save_checkpoint(ema_state, args.output_dir, global_step, args.size,
-                    model, optimizer, scheduler, scaler)
+                    model, optimizer, scheduler)
     elapsed = time.time() - start_time
     print(f"\nTraining complete. {global_step} steps in {elapsed/60:.1f} minutes.")
 
 
 def save_checkpoint(ema_state, output_dir, step, size, model=None,
-                    optimizer=None, scheduler=None, scaler=None):
+                    optimizer=None, scheduler=None):
     """Save EMA weights (safetensors for inference) + full training state (.pt for resume)."""
     # Inference weights (safetensors)
     ema_cpu = {k: v.cpu().contiguous() for k, v in ema_state.items()}
@@ -665,7 +652,6 @@ def save_checkpoint(ema_state, output_dir, step, size, model=None,
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict() if scheduler else None,
-            "scaler": scaler.state_dict() if scaler else None,
             "ema": ema_state,
         }
         pt_path = os.path.join(output_dir, f"dart_{size}_latest.pt")
