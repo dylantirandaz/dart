@@ -73,20 +73,20 @@ impl DartSampler {
             let block_refs: Vec<&Tensor> = blocks.iter().collect();
             let x_seq = Tensor::cat(&block_refs, 1)?;
 
-            // Run model on partial sequence
-            let num_blocks = blocks.len();
+            // step_offset aligns RoPE positions with training layout
+            let step_offset = t - 1;
             let pred = if cfg_scale > 1.0 + 1e-6 {
-                let cond_pred = model.forward_step(&x_seq, class_ids, num_blocks)?;
+                let cond_pred = model.forward_step(&x_seq, class_ids, step_offset)?;
                 let uncond_ids = Tensor::full(
                     config.num_classes as u32,
                     class_ids.shape(),
                     device,
                 )?;
-                let uncond_pred = model.forward_step(&x_seq, &uncond_ids, num_blocks)?;
+                let uncond_pred = model.forward_step(&x_seq, &uncond_ids, step_offset)?;
                 let diff = (&cond_pred - &uncond_pred)?;
                 (uncond_pred + diff * cfg_scale)?
             } else {
-                model.forward_step(&x_seq, class_ids, num_blocks)?
+                model.forward_step(&x_seq, class_ids, step_offset)?
             };
 
             // v-prediction → x̂_0: x̂_0 = α_t · x_t − σ_t · v̂_t

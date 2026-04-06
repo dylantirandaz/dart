@@ -6,7 +6,7 @@ use candle_nn::{self as nn, Embedding, Module, VarBuilder};
 
 use super::config::DartConfig;
 use super::transformer::{
-    build_blockwise_causal_mask, build_rope_cache, RmsNorm, TransformerBlock,
+    build_blockwise_causal_mask, build_rope_cache_3d, RmsNorm, TransformerBlock,
 };
 
 /// §3.2, §B.1 — The DART model for class-conditional image generation.
@@ -26,10 +26,8 @@ pub struct DartModel {
     blocks: Vec<TransformerBlock>,
     final_norm: RmsNorm,
     output_proj: nn::Linear,
-    /// Pre-built block-wise causal mask.
+    /// Pre-built block-wise causal mask for full training sequence.
     mask: Tensor,
-    /// Pre-computed RoPE cos/sin cache.
-    rope: (Tensor, Tensor),
 }
 
 impl DartModel {
@@ -57,16 +55,12 @@ impl DartModel {
         let final_norm = RmsNorm::new(config.hidden_size, vb.pp("final_norm"))?;
         let output_proj = nn::linear(config.hidden_size, patch_dim, vb.pp("output_proj"))?;
 
-        // Pre-build the block-wise causal mask
+        // Pre-build the block-wise causal mask for full training sequence
         let mask = build_blockwise_causal_mask(
             config.num_steps,
             config.num_tokens,
             device,
         )?;
-
-        // Pre-compute RoPE cache for maximum sequence length
-        let max_seq = config.total_seq_len();
-        let rope = build_rope_cache(max_seq, &config.rope_axes_dim, device)?;
 
         Ok(Self {
             config,
@@ -76,7 +70,6 @@ impl DartModel {
             final_norm,
             output_proj,
             mask,
-            rope,
         })
     }
 
@@ -90,23 +83,24 @@ impl DartModel {
     /// # Returns
     /// Predicted clean patches: (batch, T*K, patch_dim) in v-prediction space.
     pub fn forward(&self, x: &Tensor, class_ids: &Tensor) -> Result<Tensor> {
-        let (_batch, _seq_len, _) = x.dims3()?;
+        let (_batch, seq_len, _) = x.dims3()?;
 
-        // Embed patches into hidden_size
-        let mut h = self.patch_embed.forward(x)?; // (B, T*K, D)
+        let mut h = self.patch_embed.forward(x)?;
+        let cond = self.class_embed.forward(class_ids)?;
 
-        // Get class conditioning vector for AdaLN
-        let cond = self.class_embed.forward(class_ids)?; // (B, D)
+        let mask = self.mask.unsqueeze(0)?.unsqueeze(0)?;
+        let num_blocks = seq_len / self.config.num_tokens;
+        let rope = build_rope_cache_3d(
+            num_blocks, self.config.num_tokens,
+            &self.config.rope_axes_dim, 0, h.device(),
+        )?;
 
-        // Apply transformer blocks with block-wise causal mask
-        let mask = self.mask.unsqueeze(0)?.unsqueeze(0)?; // (1, 1, T*K, T*K)
         for block in &self.blocks {
-            h = block.forward(&h, Some(&cond), Some(&mask), &self.rope)?;
+            h = block.forward(&h, Some(&cond), Some(&mask), &rope)?;
         }
 
-        // Final norm + project back to patch space
-        let h = self.final_norm.forward(&h)?; // (B, T*K, D)
-        self.output_proj.forward(&h) // (B, T*K, patch_dim)
+        let h = self.final_norm.forward(&h)?;
+        self.output_proj.forward(&h)
     }
 
     /// Forward pass for a single denoising step during inference.
@@ -126,33 +120,29 @@ impl DartModel {
         &self,
         x_partial: &Tensor,
         class_ids: &Tensor,
-        _current_step: usize,
+        step_offset: usize,
     ) -> Result<Tensor> {
         let (_batch, seq_len, _) = x_partial.dims3()?;
         let k = self.config.num_tokens;
         let num_blocks = seq_len / k;
 
-        // Embed
         let mut h = self.patch_embed.forward(x_partial)?;
-
-        // Class conditioning
         let cond = self.class_embed.forward(class_ids)?;
 
-        // Build a partial causal mask for just this subsequence
         let mask = build_blockwise_causal_mask(num_blocks, k, h.device())?;
         let mask = mask.unsqueeze(0)?.unsqueeze(0)?;
 
-        // Build RoPE for this subsequence length
-        let rope = build_rope_cache(seq_len, &self.config.rope_axes_dim, h.device())?;
+        // 3D RoPE with step_offset so positions match training layout
+        let rope = build_rope_cache_3d(
+            num_blocks, k, &self.config.rope_axes_dim, step_offset, h.device(),
+        )?;
 
         for block in &self.blocks {
             h = block.forward(&h, Some(&cond), Some(&mask), &rope)?;
         }
 
         let h = self.final_norm.forward(&h)?;
-        let out = self.output_proj.forward(&h)?; // (B, num_blocks*K, patch_dim)
-
-        // Extract only the first K tokens (the prediction for step t)
+        let out = self.output_proj.forward(&h)?;
         out.narrow(1, 0, k)
     }
 

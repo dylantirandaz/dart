@@ -44,6 +44,9 @@ CONFIGS = {
 PATCH_SIZE = 2
 VAE_CHANNELS = 4
 PATCH_DIM = PATCH_SIZE * PATCH_SIZE * VAE_CHANNELS  # 16
+GRID_SIZE = 16  # spatial grid = 16x16 patches for 256x256 images
+NUM_TOKENS = GRID_SIZE * GRID_SIZE  # 256 tokens per denoising step
+ROPE_AXES_DIM = (16, 24, 24)  # §B.1: (denoising_step, spatial_h, spatial_w)
 
 
 # ---------------------------------------------------------------------------
@@ -106,16 +109,51 @@ class AdaLN(nn.Module):
         return self.linear(c).chunk(6, dim=-1)
 
 
-class RotaryEmbedding(nn.Module):
-    def __init__(self, dim, max_seq=8192):
-        super().__init__()
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
-        self.register_buffer("inv_freq", inv_freq)
+class RotaryEmbedding3D(nn.Module):
+    """3-axis decomposed RoPE (§B.1): (denoising_step, spatial_h, spatial_w).
 
-    def forward(self, seq_len, device):
-        t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
-        freqs = torch.outer(t, self.inv_freq)
-        return torch.cat([freqs, freqs], dim=-1)
+    Each token's position is decomposed into 3 coordinates, and each axis
+    gets independent sinusoidal frequencies. This lets the model distinguish
+    spatial vs temporal positions within the denoising sequence.
+    """
+    def __init__(self, axes_dim=ROPE_AXES_DIM):
+        super().__init__()
+        self.axes_dim = axes_dim
+        self.axis_half_dims = [d // 2 for d in axes_dim]
+        inv_freqs = []
+        for dim in axes_dim:
+            inv_freqs.append(1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim)))
+        self.register_buffer("inv_freq", torch.cat(inv_freqs))
+
+    def forward(self, num_steps, num_tokens, device, step_offset=0):
+        """Build 3D RoPE frequencies for a sequence of num_steps * num_tokens tokens.
+
+        Args:
+            num_steps: number of denoising step blocks in the sequence
+            num_tokens: tokens per step (256)
+            device: computation device
+            step_offset: starting step index (for sampling partial sequences)
+        """
+        grid_size = int(num_tokens ** 0.5)
+
+        # 3D positions for each token
+        step_pos = (torch.arange(num_steps, device=device) + step_offset
+                    ).repeat_interleave(num_tokens).float()
+        spatial = torch.arange(num_tokens, device=device)
+        row_pos = (spatial // grid_size).repeat(num_steps).float()
+        col_pos = (spatial % grid_size).repeat(num_steps).float()
+
+        # Per-axis frequencies, concatenated
+        positions = [step_pos, row_pos, col_pos]
+        freqs_parts = []
+        offset = 0
+        for pos, half_dim in zip(positions, self.axis_half_dims):
+            axis_inv_freq = self.inv_freq[offset:offset + half_dim].to(device)
+            freqs_parts.append(torch.outer(pos, axis_inv_freq))
+            offset += half_dim
+
+        raw_freqs = torch.cat(freqs_parts, dim=-1)  # (S, 32)
+        return torch.cat([raw_freqs, raw_freqs], dim=-1)  # (S, 64)
 
 
 def apply_rope(x, freqs):
@@ -200,15 +238,15 @@ class DartModel(nn.Module):
         ])
         self.final_norm = RMSNorm(dim)
         self.output_proj = nn.Linear(dim, PATCH_DIM)
-        rope_dim = sum([16, 24, 24])
-        self.rope = RotaryEmbedding(rope_dim)
+        self.rope = RotaryEmbedding3D()
         self.num_steps = num_steps
 
-    def forward(self, x, class_ids, mask=None):
+    def forward(self, x, class_ids, mask=None, step_offset=0):
         B, S, _ = x.shape
         h = self.patch_embed(x)
         cond = self.class_embed(class_ids)
-        rope_freqs = self.rope(S, h.device)
+        num_blocks = S // NUM_TOKENS
+        rope_freqs = self.rope(num_blocks, NUM_TOKENS, h.device, step_offset)
         for block in self.blocks:
             h = block(h, cond, mask, rope_freqs)
         return self.output_proj(self.final_norm(h))
@@ -271,12 +309,15 @@ def sample(model, schedule, num_classes, num_steps, num_tokens, class_ids,
         x_seq = torch.cat(blocks, dim=1)
         mask = build_blockwise_causal_mask(len(blocks), num_tokens, device)
 
+        # step_offset aligns RoPE positions with training layout
+        step_offset = t - 1
+
         with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
-            v_pred = model(x_seq, class_ids, mask)[:, :num_tokens, :]
+            v_pred = model(x_seq, class_ids, mask, step_offset)[:, :num_tokens, :]
 
             if cfg_scale > 1.0:
                 uncond_ids = torch.full_like(class_ids, num_classes)
-                v_uncond = model(x_seq, uncond_ids, mask)[:, :num_tokens, :]
+                v_uncond = model(x_seq, uncond_ids, mask, step_offset)[:, :num_tokens, :]
                 v_pred = v_uncond + cfg_scale * (v_pred - v_uncond)
 
         # v-prediction → x̂_0: x̂_0 = α_t · x_t − σ_t · v̂_t

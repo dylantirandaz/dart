@@ -32,33 +32,54 @@ impl RmsNorm {
 // Rotary Position Embeddings (§B.1: axes [16, 24, 24])
 // ---------------------------------------------------------------------------
 
-/// Precompute flat RoPE frequency tensors matching PyTorch training implementation.
-/// Uses total head_dim (sum of rope_axes_dim) as a single flat dimension.
-pub fn build_rope_cache(
-    seq_len: usize,
+/// §B.1 — 3-axis decomposed RoPE: (denoising_step, spatial_h, spatial_w).
+///
+/// Each token's position is decomposed into 3 coordinates. Each axis gets
+/// independent sinusoidal frequencies, then they're concatenated.
+pub fn build_rope_cache_3d(
+    num_steps: usize,
+    num_tokens: usize,
     axes_dim: &[usize; 3],
+    step_offset: usize,
     device: &Device,
 ) -> Result<(Tensor, Tensor)> {
-    let total_dim: usize = axes_dim.iter().sum();
-    let half = total_dim / 2;
+    let grid_size = (num_tokens as f64).sqrt() as usize;
+    let seq_len = num_steps * num_tokens;
 
-    // inv_freq = 1 / 10000^(2i / total_dim) for i in 0..half
-    let theta: Vec<f32> = (0..half)
-        .map(|i| 1.0 / 10000f32.powf(2.0 * i as f32 / total_dim as f32))
-        .collect();
-    let theta = Tensor::from_vec(theta, half, device)?;
-    let positions: Vec<f32> = (0..seq_len).map(|p| p as f32).collect();
-    let positions = Tensor::from_vec(positions, seq_len, device)?;
+    // Build per-axis inv_freq and positions
+    let mut all_raw_freqs: Vec<Tensor> = Vec::new();
 
-    // (seq_len, half)
-    let freqs = positions
-        .unsqueeze(1)?
-        .broadcast_mul(&theta.unsqueeze(0)?)?;
+    for (axis_idx, &dim) in axes_dim.iter().enumerate() {
+        let half = dim / 2;
+        let theta: Vec<f32> = (0..half)
+            .map(|i| 1.0 / 10000f32.powf(2.0 * i as f32 / dim as f32))
+            .collect();
+        let theta = Tensor::from_vec(theta, half, device)?;
 
-    let cos = freqs.cos()?;
-    let sin = freqs.sin()?;
+        // Build position vector for this axis
+        let positions: Vec<f32> = (0..seq_len)
+            .map(|p| {
+                let block = p / num_tokens;
+                let token = p % num_tokens;
+                match axis_idx {
+                    0 => (block + step_offset) as f32,  // denoising step
+                    1 => (token / grid_size) as f32,     // spatial row
+                    _ => (token % grid_size) as f32,     // spatial col
+                }
+            })
+            .collect();
+        let positions = Tensor::from_vec(positions, seq_len, device)?;
 
-    // Duplicate to full dim: (seq_len, total_dim) — matches Python's cat([freqs, freqs])
+        let freqs = positions.unsqueeze(1)?.broadcast_mul(&theta.unsqueeze(0)?)?;
+        all_raw_freqs.push(freqs);
+    }
+
+    // Concatenate raw freqs across axes: (S, 32), then double: (S, 64)
+    let raw_refs: Vec<&Tensor> = all_raw_freqs.iter().collect();
+    let raw = Tensor::cat(&raw_refs, 1)?;
+
+    let cos = raw.cos()?;
+    let sin = raw.sin()?;
     let cos = Tensor::cat(&[&cos, &cos], 1)?;
     let sin = Tensor::cat(&[&sin, &sin], 1)?;
 
