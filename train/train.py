@@ -538,6 +538,13 @@ def train(args):
                 v_pred = model(x_input, labels, mask)
                 loss = F.mse_loss(v_pred, v_targets) / accum_steps
 
+            # Skip NaN losses to prevent poisoning weights
+            if torch.isnan(loss) or torch.isinf(loss):
+                optimizer.zero_grad()
+                if scaler:
+                    scaler.update()
+                continue
+
             if scaler:
                 scaler.scale(loss).backward()
             else:
@@ -556,10 +563,11 @@ def train(args):
                 optimizer.zero_grad()
                 scheduler.step()
 
-                # EMA
+                # EMA (only update if weights are valid)
                 with torch.no_grad():
                     for k, v in model.state_dict().items():
-                        ema_state[k].mul_(ema_decay).add_(v, alpha=1 - ema_decay)
+                        if not torch.isnan(v).any():
+                            ema_state[k].mul_(ema_decay).add_(v, alpha=1 - ema_decay)
 
                 global_step += 1
 
