@@ -57,9 +57,21 @@ impl DartModel {
         let final_norm = RmsNorm::new(config.hidden_size, vb.pp("final_norm"))?;
         let output_proj = nn::linear(config.hidden_size, patch_dim, vb.pp("output_proj"))?;
 
-        // Load RoPE inv_freq from checkpoint (matches training frequencies)
+        // Load RoPE inv_freq from checkpoint if present, otherwise compute from config
         let total_half_dims: usize = config.rope_axes_dim.iter().map(|d| d / 2).sum();
-        let rope_inv_freq = vb.get(total_half_dims, "rope.inv_freq")?;
+        let rope_inv_freq = match vb.get(total_half_dims, "rope.inv_freq") {
+            Ok(t) => t,
+            Err(_) => {
+                // Compute 3D decomposed inv_freq from config
+                let mut all: Vec<f32> = Vec::new();
+                for &dim in &config.rope_axes_dim {
+                    for i in 0..(dim / 2) {
+                        all.push(1.0 / 10000f32.powf(2.0 * i as f32 / dim as f32));
+                    }
+                }
+                Tensor::from_vec(all, total_half_dims, device)?
+            }
+        };
 
         // Pre-build the block-wise causal mask for full training sequence
         let mask = build_blockwise_causal_mask(
