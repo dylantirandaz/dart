@@ -162,6 +162,7 @@ fn main() -> Result<()> {
             let (b, k, pd) = patches.dims3()?;
             println!("  Patches: ({b}, {k}, {pd})");
 
+
             if no_decode || weights.is_none() {
                 if weights.is_none() {
                     println!("\n  Architecture verified (random weights).");

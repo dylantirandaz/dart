@@ -6,7 +6,7 @@ use candle_nn::{self as nn, Embedding, Module, VarBuilder};
 
 use super::config::DartConfig;
 use super::transformer::{
-    build_blockwise_causal_mask, build_rope_cache_3d, RmsNorm, TransformerBlock,
+    build_blockwise_causal_mask, build_rope_cache_from_inv_freq, RmsNorm, TransformerBlock,
 };
 
 /// §3.2, §B.1 — The DART model for class-conditional image generation.
@@ -28,6 +28,8 @@ pub struct DartModel {
     output_proj: nn::Linear,
     /// Pre-built block-wise causal mask for full training sequence.
     mask: Tensor,
+    /// RoPE inverse frequencies loaded from checkpoint.
+    rope_inv_freq: Tensor,
 }
 
 impl DartModel {
@@ -55,6 +57,10 @@ impl DartModel {
         let final_norm = RmsNorm::new(config.hidden_size, vb.pp("final_norm"))?;
         let output_proj = nn::linear(config.hidden_size, patch_dim, vb.pp("output_proj"))?;
 
+        // Load RoPE inv_freq from checkpoint (matches training frequencies)
+        let total_half_dims: usize = config.rope_axes_dim.iter().map(|d| d / 2).sum();
+        let rope_inv_freq = vb.get(total_half_dims, "rope.inv_freq")?;
+
         // Pre-build the block-wise causal mask for full training sequence
         let mask = build_blockwise_causal_mask(
             config.num_steps,
@@ -70,6 +76,7 @@ impl DartModel {
             final_norm,
             output_proj,
             mask,
+            rope_inv_freq,
         })
     }
 
@@ -90,9 +97,9 @@ impl DartModel {
 
         let mask = self.mask.unsqueeze(0)?.unsqueeze(0)?;
         let num_blocks = seq_len / self.config.num_tokens;
-        let rope = build_rope_cache_3d(
+        let rope = build_rope_cache_from_inv_freq(
             num_blocks, self.config.num_tokens,
-            &self.config.rope_axes_dim, 0, h.device(),
+            &self.config.rope_axes_dim, &self.rope_inv_freq, 0, h.device(),
         )?;
 
         for block in &self.blocks {
@@ -132,9 +139,9 @@ impl DartModel {
         let mask = build_blockwise_causal_mask(num_blocks, k, h.device())?;
         let mask = mask.unsqueeze(0)?.unsqueeze(0)?;
 
-        // 3D RoPE with step_offset so positions match training layout
-        let rope = build_rope_cache_3d(
-            num_blocks, k, &self.config.rope_axes_dim, step_offset, h.device(),
+        let rope = build_rope_cache_from_inv_freq(
+            num_blocks, k, &self.config.rope_axes_dim, &self.rope_inv_freq,
+            step_offset, h.device(),
         )?;
 
         for block in &self.blocks {
@@ -149,4 +156,5 @@ impl DartModel {
     pub fn config(&self) -> &DartConfig {
         &self.config
     }
+
 }

@@ -36,45 +36,43 @@ impl RmsNorm {
 ///
 /// Each token's position is decomposed into 3 coordinates. Each axis gets
 /// independent sinusoidal frequencies, then they're concatenated.
-pub fn build_rope_cache_3d(
+/// Build RoPE cache using inv_freq loaded from the checkpoint.
+/// This ensures inference matches the exact frequencies used during training.
+pub fn build_rope_cache_from_inv_freq(
     num_steps: usize,
     num_tokens: usize,
     axes_dim: &[usize; 3],
+    inv_freq: &Tensor,
     step_offset: usize,
     device: &Device,
 ) -> Result<(Tensor, Tensor)> {
     let grid_size = (num_tokens as f64).sqrt() as usize;
     let seq_len = num_steps * num_tokens;
+    let axis_half_dims: Vec<usize> = axes_dim.iter().map(|d| d / 2).collect();
 
-    // Build per-axis inv_freq and positions
     let mut all_raw_freqs: Vec<Tensor> = Vec::new();
+    let mut offset = 0;
 
-    for (axis_idx, &dim) in axes_dim.iter().enumerate() {
-        let half = dim / 2;
-        let theta: Vec<f32> = (0..half)
-            .map(|i| 1.0 / 10000f32.powf(2.0 * i as f32 / dim as f32))
-            .collect();
-        let theta = Tensor::from_vec(theta, half, device)?;
+    for (axis_idx, &half) in axis_half_dims.iter().enumerate() {
+        let theta = inv_freq.narrow(0, offset, half)?;
+        offset += half;
 
-        // Build position vector for this axis
         let positions: Vec<f32> = (0..seq_len)
             .map(|p| {
                 let block = p / num_tokens;
                 let token = p % num_tokens;
                 match axis_idx {
-                    0 => (block + step_offset) as f32,  // denoising step
-                    1 => (token / grid_size) as f32,     // spatial row
-                    _ => (token % grid_size) as f32,     // spatial col
+                    0 => (block + step_offset) as f32,
+                    1 => (token / grid_size) as f32,
+                    _ => (token % grid_size) as f32,
                 }
             })
             .collect();
         let positions = Tensor::from_vec(positions, seq_len, device)?;
-
         let freqs = positions.unsqueeze(1)?.broadcast_mul(&theta.unsqueeze(0)?)?;
         all_raw_freqs.push(freqs);
     }
 
-    // Concatenate raw freqs across axes: (S, 32), then double: (S, 64)
     let raw_refs: Vec<&Tensor> = all_raw_freqs.iter().collect();
     let raw = Tensor::cat(&raw_refs, 1)?;
 
