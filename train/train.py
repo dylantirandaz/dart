@@ -120,10 +120,11 @@ class RotaryEmbedding3D(nn.Module):
         super().__init__()
         self.axes_dim = axes_dim
         self.axis_half_dims = [d // 2 for d in axes_dim]
+        # Not a buffer — prevents checkpoints from overwriting with stale values
         inv_freqs = []
         for dim in axes_dim:
             inv_freqs.append(1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim)))
-        self.register_buffer("inv_freq", torch.cat(inv_freqs))
+        self.inv_freq = torch.cat(inv_freqs)
 
     def forward(self, num_steps, num_tokens, device, step_offset=0):
         """Build 3D RoPE frequencies for a sequence of num_steps * num_tokens tokens.
@@ -551,7 +552,7 @@ def train(args):
         pt_path = args.resume
         print(f"Resuming from {pt_path}...")
         ckpt = torch.load(pt_path, map_location=device, weights_only=False)
-        model.load_state_dict(ckpt["model"])
+        model.load_state_dict(ckpt["model"], strict=False)
         optimizer.load_state_dict(ckpt["optimizer"])
         if ckpt.get("scheduler"):
             scheduler.load_state_dict(ckpt["scheduler"])
