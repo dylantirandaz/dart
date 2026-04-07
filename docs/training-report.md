@@ -5,9 +5,9 @@
 
 ## Overview
 
-This report documents the first complete training run of our DART implementation --- a from-scratch reimplementation of Apple's Denoising Autoregressive Transformer in both Python (training) and Rust (inference). DART combines autoregressive and diffusion modeling: a transformer processes a sequence of progressively denoised image patches, with block-wise causal attention so each denoising step can condition on all noisier steps.
+This is a from-scratch reimplementation of Apple's DART paper in Python (training) and Rust (inference). DART is a hybrid between autoregressive and diffusion models. A transformer processes a sequence of progressively denoised image patches using block-wise causal attention, so each denoising step can see all the noisier steps that came before it.
 
-The goal of this cycle was to validate the full pipeline end-to-end: training convergence, sample quality progression, and cross-language inference compatibility.
+This training cycle was about validating the full pipeline: does the model converge, do samples improve over time, and can the Rust inference binary load the trained weights and produce images.
 
 ## Architecture
 
@@ -27,13 +27,13 @@ The goal of this cycle was to validate the full pipeline end-to-end: training co
 
 ### 3-Axis Decomposed RoPE
 
-Per Section B.1 of the paper, we decompose rotary position embeddings into three independent axes:
+Following Section B.1 of the paper, rotary position embeddings are split into three axes:
 
 - **Denoising step** (16 dims): which noise level in the T-step sequence
 - **Spatial row** (24 dims): vertical position in the 16x16 patch grid
 - **Spatial column** (24 dims): horizontal position in the grid
 
-This gives the attention mechanism explicit awareness of both spatial layout and denoising progress, rather than treating all 1024 tokens as a flat sequence.
+Without this, the model sees all 1024 tokens as a flat sequence with no notion of 2D layout or which denoising step they belong to. The decomposition makes those relationships explicit.
 
 ## Training Configuration
 
@@ -58,99 +58,95 @@ This gives the attention mechanism explicit awareness of both spatial layout and
 
 ## Sample Progression
 
-Each grid shows one generated image per CIFAR-10 class (airplane, automobile, bird, cat, deer, dog, frog, horse, ship, truck) using classifier-free guidance at scale 1.5.
+Each grid shows one sample per CIFAR-10 class (airplane, automobile, bird, cat, deer, dog, frog, horse, ship, truck), generated with classifier-free guidance at scale 1.5.
 
-### Step 5,000 --- Noise with Emerging Color Bias
+### Step 5,000
 
 ![Step 5K](samples/samples_step5000.png)
 
-The model has learned basic color distributions per class but produces only noisy textures. No spatial structure yet.
+Mostly noise. The model has picked up on rough color distributions per class but there's no spatial structure.
 
-### Step 20,000 --- Scene Structure Emerges
+### Step 20,000
 
 ![Step 20K](samples/samples_step20000.png)
 
-Coherent backgrounds appear: sky gradients, water, terrain. Some class-specific coloring (blue for airplane/ship, green/brown for animals). Objects are not yet distinguishable.
+Backgrounds start making sense: sky gradients, water, green/brown terrain. You can tell which classes are "outdoor" vs not. Objects themselves aren't there yet.
 
-### Step 30,000 --- Color Differentiation
+### Step 30,000
 
 ![Step 30K](samples/samples_step30000.png)
 
-Stronger per-class color palettes. Blocky patch artifacts visible as the model learns to coordinate predictions across the 16x16 spatial grid.
+Per-class color palettes are stronger. There are visible blocky artifacts from the 16x16 patch grid as the model figures out how to coordinate predictions across spatial positions.
 
-### Step 75,000 --- Recognizable Objects
+### Step 75,000
 
 ![Step 75K](samples/samples_step75000.png)
 
-Clear object silhouettes: cars with windshields, horses in profile, ships on water, birds in flight. Backgrounds are coherent. The model has learned class-specific structure.
+Objects are recognizable now. Cars have windshields, horses stand in profile, ships sit on water. Backgrounds are coherent and match the class.
 
-### Step 100,000 --- Final
+### Step 100,000 (Final)
 
 ![Step 100K](samples/samples_step100000.png)
 
-Best quality achieved. Objects are distinguishable with correct proportions and class-appropriate contexts (horses on grass, ships on water, cars on roads). Remaining blur is inherent to CIFAR-10's 32x32 source resolution upscaled to 256x256.
+Best results from this run. Objects have correct proportions and sit in appropriate contexts (horses on grass, ships on water, cars on roads). The blur is a hard limit from CIFAR-10's 32x32 source images being upscaled to 256x256.
 
 ## Training Dynamics
 
-### Loss Curve
+### Loss
 
 | Step Range | Loss | Notes |
 |-----------|------|-------|
-| 0 - 5K | ~0.45 - 0.50 | Initial learning, high variance |
-| 5K - 20K | ~0.40 - 0.45 | Steady descent |
-| 20K - 40K | ~0.33 - 0.40 | Accelerating improvement |
-| 40K - 70K | ~0.30 - 0.35 | Fine-grained learning |
-| 70K - 100K | ~0.28 - 0.35 | Convergence plateau |
+| 0-5K | ~0.45-0.50 | High variance, initial learning |
+| 5K-20K | ~0.40-0.45 | Steady drop |
+| 20K-40K | ~0.33-0.40 | Fastest improvement phase |
+| 40K-70K | ~0.30-0.35 | Diminishing returns |
+| 70K-100K | ~0.28-0.35 | Plateauing |
 
-Loss decreased monotonically with no NaN or divergence events across the full 100K steps.
+No NaN or divergence across the full run.
 
-### Training Speed
+### Speed
 
-| Phase | Speed | Bottleneck |
-|-------|-------|-----------|
-| Steps 0-70K (no cache) | ~1.9 it/s | VAE encoding every batch |
-| Steps 70K-100K (cached) | ~8 it/s | Pure transformer forward/backward |
+| Phase | Speed | Why |
+|-------|-------|-----|
+| Steps 0-70K (no cache) | ~1.9 it/s | VAE encoder running every batch |
+| Steps 70K-100K (cached latents) | ~8 it/s | Just the transformer |
 
-Pre-caching all 50K VAE latents to disk (~820MB) eliminated per-batch VAE encoding and provided a **~4x speedup**.
+CIFAR-10 only has 50K images. Running every image through the VAE encoder 16+ times is wasteful. Caching all the latents to disk once (~820MB) and loading them directly gave a ~4x speedup.
 
-## Challenges and Solutions
+## Problems Hit Along the Way
 
-### 1. fp16 NaN Collapse at ~30K Steps
+### fp16 NaN at ~30K steps
 
-**Problem:** Training with fp16 mixed precision (via `torch.amp.GradScaler`) consistently produced NaN loss at approximately step 30,000-35,000. The GradScaler's dynamic loss scaling would shrink to near-zero after repeated NaN detections, causing all subsequent gradients to underflow.
+The first training attempt used fp16 mixed precision with PyTorch's `GradScaler`. It consistently blew up around step 30K-35K. The loss would go NaN, the scaler would shrink its scale factor, more NaNs would follow, and eventually all gradients underflowed to zero. The model was dead but the training loop kept running (NaN protection skipped the bad steps, but the weights were already corrupted).
 
-**Solution:** Switched to bf16, which has the same exponent range as fp32 (8 bits vs fp16's 5 bits) and requires no loss scaling. Training ran the full 100K steps without a single NaN.
+Fix: switched to bf16. It has 8 exponent bits (same as fp32) instead of fp16's 5, so the dynamic range is large enough that you don't need loss scaling at all. Dropped the `GradScaler` entirely. Training ran clean for 100K steps after that.
 
-### 2. Windows DataLoader Shared Memory Exhaustion
+### Windows DataLoader crashes
 
-**Problem:** Using `num_workers > 0` in PyTorch's DataLoader on Windows causes shared memory exhaustion on long training runs, crashing the process.
+PyTorch's DataLoader with `num_workers > 0` on Windows exhausts shared memory on long runs. Setting `--workers 0` avoids it. The latent caching later made this irrelevant since the cached dataset is just a tensor load.
 
-**Solution:** Default to `--workers 0` on Windows. The latent caching optimization later eliminated this as a bottleneck entirely.
+### Surviving crashes on consumer hardware
 
-### 3. Training Resilience
+A 100K step run takes hours on a single 4080. Power blips, Windows updates, etc. can kill it. Checkpoint resume (full optimizer/scheduler/EMA state saved every 5K steps) plus a watchdog script that auto-restarts on crash made this manageable.
 
-**Problem:** Long training runs on consumer hardware are vulnerable to crashes, power events, and OS interruptions.
+## Stack
 
-**Solution:** Built checkpoint resume support (saves full optimizer/scheduler/EMA state every 5K steps) and a watchdog script that monitors the process and auto-restarts from the latest checkpoint on crash.
+- **Training:** Python, PyTorch
+- **Inference:** Rust, [candle](https://github.com/huggingface/candle)
+- **Weight format:** Safetensors (Python writes, Rust reads)
+- **VAE:** Stable Diffusion v1 encoder/decoder, used in both runtimes
 
-## Implementation Stack
-
-- **Training:** Python + PyTorch with custom transformer, RoPE, and sampling
-- **Inference:** Rust + [candle](https://github.com/huggingface/candle) (Hugging Face's Rust ML framework)
-- **Model exchange:** Safetensors format (Python trains, Rust loads for inference)
-- **VAE:** Stable Diffusion v1 encoder/decoder shared across both runtimes
-
-The full pipeline is verified end-to-end: Python training produces safetensors checkpoints that the Rust binary loads for inference, decodes through the VAE, and outputs PNG images.
+The whole pipeline works end-to-end: train in Python, export safetensors, load in Rust, run inference, decode through VAE, get a PNG.
 
 ## Limitations
 
-- **CIFAR-10 resolution ceiling:** The source images are 32x32, upscaled to 256x256 for the VAE. This creates an inherent blur ceiling --- the model cannot generate detail that doesn't exist in the training data.
-- **T=4 denoising steps:** Limited by 16GB VRAM. The paper uses T=16 for best quality. More steps allow finer-grained denoising but require proportionally more memory (sequence length = T x 256).
-- **No FID evaluation:** Quantitative metrics were not computed in this cycle. Visual quality assessment only.
+- **CIFAR-10 is the wrong dataset for this.** 32x32 images upscaled to 256x256 can't produce sharp results no matter how long you train. Need a native high-res dataset to see what the model can really do.
+- **T=4 is low.** The paper uses T=16 for their best results. 16GB VRAM limits us to 4 steps, which means coarser denoising. Each step has to do more work.
+- **No quantitative eval.** Haven't computed FID or IS yet. Everything here is qualitative.
 
-## Next Steps
+## What's Next
 
-1. **Higher-quality dataset:** Train on a native 256x256 dataset (CelebA-HQ, LSUN Bedrooms, or similar) to remove the CIFAR-10 blur ceiling.
-2. **Rust inference validation:** Generate samples from the Rust binary using the 100K checkpoint and compare against Python outputs.
-3. **Quantitative evaluation:** Compute FID/IS scores against the CIFAR-10 test set.
-4. **Scale up T:** With latent caching freeing VRAM, experiment with T=8 denoising steps for better sample quality.
+1. Train on a native 256x256 dataset (CelebA-HQ, LSUN, or similar) to get past the CIFAR blur ceiling
+2. Run Rust inference on the 100K checkpoint and compare outputs against Python
+3. Compute FID/IS on CIFAR-10 test set
+4. Try T=8 now that latent caching frees up some VRAM headroom
