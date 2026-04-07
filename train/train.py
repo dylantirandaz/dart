@@ -392,6 +392,38 @@ def get_imagefolder_dataset(data_dir):
     return datasets.ImageFolder(data_dir, transform=transform)
 
 
+class CachedLatentDataset(torch.utils.data.Dataset):
+    """Pre-encoded VAE latents for fast training (no per-batch VAE encoding)."""
+    def __init__(self, cache_path):
+        data = torch.load(cache_path, weights_only=True)
+        self.latents = data["latents"]
+        self.labels = data["labels"]
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        return self.latents[idx], self.labels[idx]
+
+
+def cache_vae_latents(dataset, vae, vae_scale, device, cache_path, batch_size=32):
+    """Encode entire dataset through VAE once and save patchified latents."""
+    print(f"  Caching VAE latents to {cache_path}...")
+    loader = DataLoader(dataset, batch_size=batch_size, num_workers=0, pin_memory=True)
+    all_latents = []
+    all_labels = []
+    with torch.no_grad():
+        for i, (images, labels) in enumerate(loader):
+            latents = vae.encode(images.to(device)).latent_dist.sample() * vae_scale
+            all_latents.append(patchify(latents, PATCH_SIZE).cpu())
+            all_labels.append(labels)
+            if (i + 1) % 100 == 0:
+                print(f"    {(i + 1) * batch_size}/{len(dataset)} images encoded")
+    os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
+    torch.save({"latents": torch.cat(all_latents), "labels": torch.cat(all_labels)}, cache_path)
+    print(f"  Cached {len(dataset)} latents ({os.path.getsize(cache_path) / 1e6:.0f} MB)")
+
+
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
@@ -409,12 +441,12 @@ def train(args):
 
     # Dataset
     if args.dataset == "cifar10":
-        dataset = get_cifar10_dataset()
+        raw_dataset = get_cifar10_dataset()
         num_classes = 10
     else:
-        dataset = get_imagefolder_dataset(args.data_dir)
-        num_classes = len(dataset.classes)
-    print(f"Dataset: {len(dataset)} images, {num_classes} classes")
+        raw_dataset = get_imagefolder_dataset(args.data_dir)
+        num_classes = len(raw_dataset.classes)
+    print(f"Dataset: {len(raw_dataset)} images, {num_classes} classes")
 
     # Compute num_tokens from image resolution
     # 256x256 -> VAE latent 32x32 -> patchified with ps=2 -> 16x16 = 256 tokens
@@ -425,6 +457,23 @@ def train(args):
     print(f"Denoising steps (T): {num_steps}")
     print(f"Tokens per step (K): {num_tokens}")
     print(f"Total sequence length: {seq_len}")
+
+    # VAE for encoding images to latents
+    print("Loading VAE (stabilityai/sd-vae-ft-ema)...")
+    from diffusers import AutoencoderKL
+    vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to(device).eval()
+    for p in vae.parameters():
+        p.requires_grad = False
+    vae_scale = 0.18215
+    print("  VAE loaded")
+
+    # Pre-cache VAE latents (encode once, train fast)
+    cache_path = os.path.join("data", f"{args.dataset}_latents.pt")
+    if not os.path.exists(cache_path):
+        cache_vae_latents(raw_dataset, vae, vae_scale, device, cache_path)
+    else:
+        print(f"  Using cached latents: {cache_path}")
+    dataset = CachedLatentDataset(cache_path)
 
     # Figure out batch size for available VRAM
     # Rough heuristic: seq_len * hidden_size * num_layers * 12 bytes per sample
@@ -446,15 +495,6 @@ def train(args):
         dataset, batch_size=effective_batch, shuffle=True,
         num_workers=args.workers, pin_memory=True, drop_last=True,
     )
-
-    # VAE for encoding images to latents
-    print("Loading VAE (stabilityai/sd-vae-ft-ema)...")
-    from diffusers import AutoencoderKL
-    vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to(device).eval()
-    for p in vae.parameters():
-        p.requires_grad = False
-    vae_scale = 0.18215
-    print("  VAE loaded")
 
     # Model
     model = DartModel(cfg, num_steps=num_steps, num_classes=num_classes).to(device)
@@ -536,14 +576,14 @@ def train(args):
     print()
 
     for epoch in range(start_epoch, args.epochs):
-        for batch_idx, (images, labels) in enumerate(loader):
+        for batch_idx, (x0, labels) in enumerate(loader):
             # Skip batches already completed in the resume epoch
             if epoch == start_epoch and batch_idx < start_batch:
                 continue
             if args.steps and global_step >= args.steps:
                 break
 
-            images = images.to(device)
+            x0 = x0.to(device)
             labels = labels.to(device)
 
             # §B.2 — 10% unconditional dropout for classifier-free guidance
@@ -551,12 +591,6 @@ def train(args):
             labels = labels.clone()
             labels[drop_mask] = num_classes  # unconditional token
 
-            # Encode to VAE latent space
-            with torch.no_grad():
-                latents = vae.encode(images).latent_dist.sample() * vae_scale
-
-            # Patchify
-            x0 = patchify(latents, PATCH_SIZE)
             B = x0.shape[0]
 
             # Create noisy versions for all T steps
