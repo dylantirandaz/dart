@@ -642,17 +642,10 @@ def train(args):
             x_input = torch.cat(all_noisy, dim=1)
             v_targets = torch.cat(all_targets, dim=1)
 
-            # Forward + loss with SNR weighting (§3.2 Eq.7, bf16 autocast)
+            # Forward + loss (bf16: same dynamic range as fp32, no scaler needed)
             with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=use_amp):
                 v_pred = model(x_input, labels, mask)
-                # Per-step weighted loss: ω_t = ∑(τ=t→T) SNR_τ
-                weighted_loss = 0.0
-                for t_idx in range(num_steps):
-                    s = t_idx * num_tokens
-                    e = s + num_tokens
-                    step_mse = F.mse_loss(v_pred[:, s:e], v_targets[:, s:e])
-                    weighted_loss = weighted_loss + schedule.omega[t_idx + 1].to(device) * step_mse
-                loss = weighted_loss / schedule.omega[1:num_steps + 1].sum() / accum_steps
+                loss = F.mse_loss(v_pred, v_targets) / accum_steps
 
             # Skip NaN losses to prevent poisoning weights
             if torch.isnan(loss) or torch.isinf(loss):
