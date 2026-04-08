@@ -388,6 +388,28 @@ def get_cifar10_dataset(data_root="./data"):
     return datasets.CIFAR10(root=data_root, train=True, download=True, transform=transform)
 
 
+def get_food101_dataset(data_root="./data"):
+    """Food-101: 101K images, 101 classes. Auto-downloads. Native high-res."""
+    transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(256),
+        transforms.ToTensor(),
+        transforms.Normalize([0.5], [0.5]),
+    ])
+    return datasets.Food101(root=data_root, split="train", download=True, transform=transform)
+
+
+def get_flowers102_dataset(data_root="./data"):
+    """Flowers-102: 8K images, 102 classes. Auto-downloads. Quick test dataset."""
+    transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(256),
+        transforms.ToTensor(),
+        transforms.Normalize([0.5], [0.5]),
+    ])
+    return datasets.Flowers102(root=data_root, split="train", download=True, transform=transform)
+
+
 def get_imagefolder_dataset(data_dir):
     """Any folder of images organized as data_dir/class_name/image.jpg"""
     transform = transforms.Compose([
@@ -450,6 +472,12 @@ def train(args):
     if args.dataset == "cifar10":
         raw_dataset = get_cifar10_dataset()
         num_classes = 10
+    elif args.dataset == "food101":
+        raw_dataset = get_food101_dataset()
+        num_classes = 101
+    elif args.dataset == "flowers102":
+        raw_dataset = get_flowers102_dataset()
+        num_classes = 102
     else:
         raw_dataset = get_imagefolder_dataset(args.data_dir)
         num_classes = len(raw_dataset.classes)
@@ -712,8 +740,9 @@ def save_checkpoint(ema_state, output_dir, step, size, model=None,
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="DART training")
     parser.add_argument("--size", choices=CONFIGS.keys(), default="small")
-    parser.add_argument("--dataset", choices=["cifar10", "folder"], default="folder",
-                        help="cifar10 auto-downloads; folder uses --data-dir")
+    parser.add_argument("--dataset", choices=["cifar10", "food101", "flowers102", "folder"],
+                        default="folder",
+                        help="cifar10/food101/flowers102 auto-download; folder uses --data-dir")
     parser.add_argument("--data-dir", type=str, default=None)
     parser.add_argument("--output-dir", type=str, default="checkpoints")
     parser.add_argument("--batch-size", type=int, default=16,
