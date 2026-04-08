@@ -503,7 +503,8 @@ def train(args):
     print("  VAE loaded")
 
     # Pre-cache VAE latents (encode once, train fast)
-    cache_path = os.path.join("data", f"{args.dataset}_latents.pt")
+    # Save cache to output dir (local disk) to avoid OneDrive I/O issues
+    cache_path = os.path.join(args.output_dir, f"{args.dataset}_latents.pt")
     if not os.path.exists(cache_path):
         cache_vae_latents(raw_dataset, vae, vae_scale, device, cache_path)
     else:
