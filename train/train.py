@@ -422,35 +422,57 @@ def get_imagefolder_dataset(data_dir):
 
 
 class CachedLatentDataset(torch.utils.data.Dataset):
-    """Pre-encoded VAE latents for fast training (no per-batch VAE encoding)."""
+    """Pre-encoded VAE latents loaded from a memory-mapped numpy file."""
     def __init__(self, cache_path):
-        data = torch.load(cache_path, weights_only=True)
-        self.latents = data["latents"]
-        self.labels = data["labels"]
+        import numpy as np
+        self.latents = np.load(cache_path + ".latents.npy", mmap_mode="r")
+        self.labels = np.load(cache_path + ".labels.npy", mmap_mode="r")
 
     def __len__(self):
         return len(self.labels)
 
     def __getitem__(self, idx):
-        return self.latents[idx], self.labels[idx]
+        return torch.from_numpy(self.latents[idx].copy()), int(self.labels[idx])
 
 
 def cache_vae_latents(dataset, vae, vae_scale, device, cache_path, batch_size=32):
-    """Encode entire dataset through VAE once and save patchified latents."""
+    """Encode entire dataset through VAE and save as memory-mapped numpy files.
+
+    Uses pre-allocated numpy mmap files so RAM usage stays constant (~100MB)
+    regardless of dataset size. Critical for ImageNet-scale (1.2M images).
+    """
+    import numpy as np
+    latent_path = cache_path + ".latents.npy"
+    label_path = cache_path + ".labels.npy"
+
     print(f"  Caching VAE latents to {cache_path}...")
+    n = len(dataset)
+    num_tokens = (256 // 8 // PATCH_SIZE) ** 2
+    patch_dim = PATCH_SIZE * PATCH_SIZE * VAE_CHANNELS
+
+    # Pre-allocate memory-mapped files on disk
+    latents_mmap = np.lib.format.open_memmap(
+        latent_path, mode="w+", dtype=np.float32, shape=(n, num_tokens, patch_dim))
+    labels_mmap = np.lib.format.open_memmap(
+        label_path, mode="w+", dtype=np.int64, shape=(n,))
+
     loader = DataLoader(dataset, batch_size=batch_size, num_workers=0, pin_memory=True)
-    all_latents = []
-    all_labels = []
+    idx = 0
     with torch.no_grad():
         for i, (images, labels) in enumerate(loader):
             latents = vae.encode(images.to(device)).latent_dist.sample() * vae_scale
-            all_latents.append(patchify(latents, PATCH_SIZE).cpu())
-            all_labels.append(labels)
+            patches = patchify(latents, PATCH_SIZE).cpu().numpy()
+            bs = patches.shape[0]
+            latents_mmap[idx:idx + bs] = patches
+            labels_mmap[idx:idx + bs] = labels.numpy()
+            idx += bs
             if (i + 1) % 100 == 0:
-                print(f"    {(i + 1) * batch_size}/{len(dataset)} images encoded")
-    os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
-    torch.save({"latents": torch.cat(all_latents), "labels": torch.cat(all_labels)}, cache_path)
-    print(f"  Cached {len(dataset)} latents ({os.path.getsize(cache_path) / 1e6:.0f} MB)")
+                print(f"    {idx}/{n} images encoded")
+
+    latents_mmap.flush()
+    labels_mmap.flush()
+    size_mb = (os.path.getsize(latent_path) + os.path.getsize(label_path)) / 1e6
+    print(f"  Cached {n} latents ({size_mb:.0f} MB)")
 
 
 # ---------------------------------------------------------------------------
@@ -504,8 +526,8 @@ def train(args):
 
     # Pre-cache VAE latents (encode once, train fast)
     # Save cache to output dir (local disk) to avoid OneDrive I/O issues
-    cache_path = os.path.join(args.output_dir, f"{args.dataset}_latents.pt")
-    if not os.path.exists(cache_path):
+    cache_path = os.path.join(args.output_dir, f"{args.dataset}_latents")
+    if not os.path.exists(cache_path + ".latents.npy"):
         cache_vae_latents(raw_dataset, vae, vae_scale, device, cache_path)
     else:
         print(f"  Using cached latents: {cache_path}")
