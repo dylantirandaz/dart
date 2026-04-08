@@ -1,152 +1,116 @@
-# DART Training Report: First 100K Steps
+# DART Training Report
 
 **Date:** April 2026
 **Paper:** [DART: Denoising Autoregressive Transformer for Scalable Text-to-Image Generation](https://arxiv.org/abs/2410.08159) (ICLR 2025)
 
 ## Overview
 
-This is a from-scratch reimplementation of Apple's DART paper in Python (training) and Rust (inference). DART is a hybrid between autoregressive and diffusion models. A transformer processes a sequence of progressively denoised image patches using block-wise causal attention, so each denoising step can see all the noisier steps that came before it.
-
-This training cycle was about validating the full pipeline: does the model converge, do samples improve over time, and can the Rust inference binary load the trained weights and produce images.
+From-scratch reimplementation of Apple's DART paper. Python for training, Rust for inference. Two full 100K-step training cycles completed on CIFAR-10 with different configurations. Full pipeline verified end-to-end: Python trains, exports safetensors, Rust loads and generates images through the VAE decoder.
 
 ## Architecture
 
 | Component | Detail |
 |-----------|--------|
-| Model | DART-S (Small) |
-| Parameters | 31.9M |
-| Layers | 12 |
-| Hidden dim | 384 |
-| Attention heads | 6 (head_dim=64) |
+| Model | DART-S (Small), 31.9M params |
+| Layers / Hidden / Heads | 12 / 384 / 6 (head_dim=64) |
 | FFN | SwiGLU |
 | Conditioning | AdaLN (class-conditional) |
 | Position encoding | 3-axis decomposed RoPE (step, row, col) |
-| Patch size | 2x2 over VAE latents |
+| Patch size | 2x2 over 4-channel VAE latents |
 | VAE | Stable Diffusion v1 (stabilityai/sd-vae-ft-ema) |
-| Loss | MSE on v-prediction targets |
+| Prediction target | v-prediction: v = alpha * noise - sigma * x0 |
 
-### 3-Axis Decomposed RoPE
+## Training Runs
 
-Following Section B.1 of the paper, rotary position embeddings are split into three axes:
+### Run 1: Flat RoPE + Uniform Loss (baseline)
 
-- **Denoising step** (16 dims): which noise level in the T-step sequence
-- **Spatial row** (24 dims): vertical position in the 16x16 patch grid
-- **Spatial column** (24 dims): horizontal position in the grid
-
-Without this, the model sees all 1024 tokens as a flat sequence with no notion of 2D layout or which denoising step they belong to. The decomposition makes those relationships explicit.
-
-## Training Configuration
+The first successful run. The "3D RoPE" code was present but a bug caused the model to use flat RoPE frequencies throughout (a registered buffer was overwritten by checkpoint loading on every resume).
 
 | Setting | Value |
 |---------|-------|
-| Dataset | CIFAR-10 (50K images, 10 classes) |
-| Image resolution | 32x32 upscaled to 256x256 |
-| Denoising steps (T) | 4 |
-| Tokens per step (K) | 256 (16x16 grid) |
-| Total sequence length | 1024 |
+| RoPE | Flat (dim=64, single geometric series) |
+| Loss weighting | Uniform across all T steps |
+| AMP | bf16 |
+| Steps | 100,000 |
 | Batch size | 8 |
-| Optimizer | AdamW (lr=3e-4, betas=0.9/0.95, wd=0.01) |
-| LR schedule | Linear warmup (10K steps) + cosine decay |
-| EMA decay | 0.9999 |
-| Gradient clipping | 2.0 |
-| Mixed precision | bf16 autocast |
-| Gradient checkpointing | Enabled |
-| CFG dropout | 10% unconditional |
-| CFG scale (sampling) | 1.5 |
-| Total steps | 100,000 |
-| Hardware | NVIDIA RTX 4080 (16GB VRAM) |
+| LR | 3e-4, cosine decay with 10K warmup |
+| T | 4 denoising steps |
+| Dataset | CIFAR-10, 50K images, 10 classes |
+| Hardware | RTX 4080 16GB |
 
-## Sample Progression
+**Results at 100K steps:**
 
-Each grid shows one sample per CIFAR-10 class (airplane, automobile, bird, cat, deer, dog, frog, horse, ship, truck), generated with classifier-free guidance at scale 1.5.
+![Flat RoPE 100K](samples/samples_step100000.png)
 
-### Step 5,000
+Recognizable class-conditioned images. Cars, horses, deer, ships, birds all distinguishable with appropriate backgrounds. Blur is from CIFAR-10's 32x32 source resolution upscaled to 256x256.
 
-![Step 5K](samples/samples_step5000.png)
+Loss settled around 0.28-0.35.
 
-Mostly noise. The model has picked up on rough color distributions per class but there's no spatial structure.
+### Run 2: True 3D RoPE + SNR Loss Weighting
 
-### Step 20,000
+Fixed the RoPE bug (stopped registering inv_freq as a buffer so checkpoints can't overwrite it). Also added the paper's SNR-based loss weighting from Eq. 7.
 
-![Step 20K](samples/samples_step20000.png)
+| Setting | Value |
+|---------|-------|
+| RoPE | 3-axis decomposed: (16, 24, 24) for (step, row, col) |
+| Loss weighting | SNR: omega_t = sum(gamma_tau / (1 - gamma_tau)) for tau=t..T |
+| Everything else | Same as Run 1 |
 
-Backgrounds start making sense: sky gradients, water, green/brown terrain. You can tell which classes are "outdoor" vs not. Objects themselves aren't there yet.
+The SNR weighting with T=4 is extreme: step t=1 gets 84% of the loss, t=2 gets 14%, t=3 gets 2%, t=4 gets ~0%.
 
-### Step 30,000
+**Results at 100K steps:**
 
-![Step 30K](samples/samples_step30000.png)
+![3D RoPE 100K](samples/samples_3drope_100000.png)
 
-Per-class color palettes are stronger. There are visible blocky artifacts from the 16x16 patch grid as the model figures out how to coordinate predictions across spatial positions.
+Worse than Run 1. Washed-out brownish tone across all classes, weak class differentiation. The model learned to refine near-clean images (t=1) but never learned the initial denoising from noise (t=4 got zero gradient). Since sampling starts from pure noise, the first prediction is poor and later steps can't recover.
 
-### Step 75,000
+Loss was lower (~0.19-0.22) because the loss is dominated by the easy step, but sample quality suffered.
 
-![Step 75K](samples/samples_step75000.png)
+### Takeaway
 
-Objects are recognizable now. Cars have windshields, horses stand in profile, ships sit on water. Backgrounds are coherent and match the class.
+The paper's SNR weighting formula was designed for T=16 where the weight distribution is more gradual. At T=4, the weighting is too extreme. Flat RoPE with uniform loss weighting gave better results on this small-T, small-dataset setup.
 
-### Step 100,000 (Final)
+A third run is planned with 3D RoPE + uniform loss weighting to isolate whether the RoPE change helps or hurts.
 
-![Step 100K](samples/samples_step100000.png)
+## Training Infrastructure
 
-Best results from this run. Objects have correct proportions and sit in appropriate contexts (horses on grass, ships on water, cars on roads). The blur is a hard limit from CIFAR-10's 32x32 source images being upscaled to 256x256.
+### Latent Caching
+The VAE encoder was running on every batch, bottlenecking training at ~1.9 it/s. Pre-caching all 50K latents to disk (~820MB) and loading them as a tensor dataset removed the VAE from the training loop entirely. Speed jumped to ~10.4 it/s.
 
-## Training Dynamics
+### OneDrive I/O
+Checkpoints were initially saved to an OneDrive-synced folder. Each 637MB save (safetensors + .pt) triggered a background sync that blocked writes for minutes, dragging down the running-average it/s metric permanently. Moving checkpoints to a local path (`C:\dart_checkpoints\`) fixed it.
 
-### Loss
+### bf16 vs fp16
+fp16 with GradScaler consistently went NaN at ~30K steps. The scaler's dynamic loss scaling would shrink to near-zero after repeated NaN detections, underflowing all gradients. bf16 has the same exponent range as fp32, needs no scaler, and ran 100K steps without a single NaN on both runs.
 
-| Step Range | Loss | Notes |
-|-----------|------|-------|
-| 0-5K | ~0.45-0.50 | High variance, initial learning |
-| 5K-20K | ~0.40-0.45 | Steady drop |
-| 20K-40K | ~0.33-0.40 | Fastest improvement phase |
-| 40K-70K | ~0.30-0.35 | Diminishing returns |
-| 70K-100K | ~0.28-0.35 | Plateauing |
+### Watchdog
+A PowerShell script monitors the training process and auto-restarts from the latest checkpoint on crash. Reads the actual step count from the .pt file to determine completion.
 
-No NaN or divergence across the full run.
+## RoPE Bug Post-Mortem
 
-### Speed
+The 3D RoPE implementation registered `inv_freq` as a PyTorch buffer via `register_buffer()`. The old flat RoPE class used the same buffer name with the same shape (32 elements). When training resumed from any checkpoint, `load_state_dict()` silently overwrote the freshly computed 3D frequencies with the old flat values.
 
-| Phase | Speed | Why |
-|-------|-------|-----|
-| Steps 0-70K (no cache) | ~1.9 it/s | VAE encoder running every batch |
-| Steps 70K-100K (cached latents) | ~8 it/s | Just the transformer |
+This went undetected because:
+- The model still trained (flat frequencies still encode some positional info)
+- The loss decreased normally
+- Samples improved over time
+- The buffer name and shape matched, so no errors were raised
 
-CIFAR-10 only has 50K images. Running every image through the VAE encoder 16+ times is wasteful. Caching all the latents to disk once (~820MB) and loading them directly gave a ~4x speedup.
+The Rust inference code computed correct 3D frequencies from scratch, causing a mismatch that produced blocky blue noise instead of images. Tracing the divergence layer-by-layer eventually revealed the inv_freq values didn't match between Python and Rust.
 
-## Problems Hit Along the Way
-
-### fp16 NaN at ~30K steps
-
-The first training attempt used fp16 mixed precision with PyTorch's `GradScaler`. It consistently blew up around step 30K-35K. The loss would go NaN, the scaler would shrink its scale factor, more NaNs would follow, and eventually all gradients underflowed to zero. The model was dead but the training loop kept running (NaN protection skipped the bad steps, but the weights were already corrupted).
-
-Fix: switched to bf16. It has 8 exponent bits (same as fp32) instead of fp16's 5, so the dynamic range is large enough that you don't need loss scaling at all. Dropped the `GradScaler` entirely. Training ran clean for 100K steps after that.
-
-### Windows DataLoader crashes
-
-PyTorch's DataLoader with `num_workers > 0` on Windows exhausts shared memory on long runs. Setting `--workers 0` avoids it. The latent caching later made this irrelevant since the cached dataset is just a tensor load.
-
-### Surviving crashes on consumer hardware
-
-A 100K step run takes hours on a single 4080. Power blips, Windows updates, etc. can kill it. Checkpoint resume (full optimizer/scheduler/EMA state saved every 5K steps) plus a watchdog script that auto-restarts on crash made this manageable.
+Fix: changed `register_buffer("inv_freq", ...)` to a plain attribute `self.inv_freq = ...`. Rust now loads inv_freq from the checkpoint when present, falls back to computing from config when absent.
 
 ## Stack
 
-- **Training:** Python, PyTorch
-- **Inference:** Rust, [candle](https://github.com/huggingface/candle)
-- **Weight format:** Safetensors (Python writes, Rust reads)
-- **VAE:** Stable Diffusion v1 encoder/decoder, used in both runtimes
-
-The whole pipeline works end-to-end: train in Python, export safetensors, load in Rust, run inference, decode through VAE, get a PNG.
-
-## Limitations
-
-- **CIFAR-10 is the wrong dataset for this.** 32x32 images upscaled to 256x256 can't produce sharp results no matter how long you train. Need a native high-res dataset to see what the model can really do.
-- **T=4 is low.** The paper uses T=16 for their best results. 16GB VRAM limits us to 4 steps, which means coarser denoising. Each step has to do more work.
-- **No quantitative eval.** Haven't computed FID or IS yet. Everything here is qualitative.
+- **Training:** Python, PyTorch, bf16 autocast, cached VAE latents
+- **Inference:** Rust, candle (HuggingFace), CPU (CUDA build requires CUDA toolkit)
+- **Weight format:** safetensors
+- **VAE:** SD v1 encoder/decoder, shared across both runtimes
 
 ## What's Next
 
-1. Train on a native 256x256 dataset (CelebA-HQ, LSUN, or similar) to get past the CIFAR blur ceiling
-2. Run Rust inference on the 100K checkpoint and compare outputs against Python
-3. Compute FID/IS on CIFAR-10 test set
-4. Try T=8 now that latent caching frees up some VRAM headroom
+1. Run 3 (in progress): 3D RoPE + uniform loss weighting
+2. Train on Food-101 or Flowers-102 for native high-res images
+3. Experiment with T=8 for finer denoising
+4. FID evaluation (script ready at eval/fid.py)
+5. KV-cache for faster sampling
