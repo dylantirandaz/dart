@@ -43,7 +43,7 @@ def load_model(weights_path, cfg, num_steps, num_classes, device):
 
     model = DartModel(cfg, num_steps=num_steps, num_classes=num_classes).to(device)
     state_dict = load_file(weights_path, device=str(device))
-    model.load_state_dict(state_dict)
+    model.load_state_dict(state_dict, strict=False)
     model.eval()
     return model
 
@@ -132,8 +132,12 @@ def main():
                         help="Number of denoising steps (default: 4)")
     parser.add_argument("--size", choices=CONFIGS.keys(), default="small",
                         help="Model size (default: small)")
+    parser.add_argument("--num-classes", type=int, default=1000,
+                        help="Number of classes (10 for CIFAR-10, 1000 for ImageNet)")
     parser.add_argument("--output-dir", type=str, default=None,
                         help="Directory to save generated images (default: temp dir)")
+    parser.add_argument("--reference-dir", type=str, default=None,
+                        help="Directory of reference images for FID (default: CIFAR-10)")
     parser.add_argument("--data-root", type=str, default="./data",
                         help="Root directory for CIFAR-10 download (default: ./data)")
     args = parser.parse_args()
@@ -143,7 +147,7 @@ def main():
     if device.type == "cuda":
         print(f"  GPU: {torch.cuda.get_device_name(0)}")
 
-    num_classes = 10
+    num_classes = args.num_classes
     cfg = CONFIGS[args.size]
     print(f"Model: DART-{args.size.upper()}")
     print(f"Checkpoint: {args.weights}")
@@ -179,9 +183,13 @@ def main():
 
     reference_dir = os.path.join(args.data_root, "cifar10_fid_ref")
 
-    # Save CIFAR-10 reference images
-    print("\nPreparing CIFAR-10 reference images...")
-    save_cifar10_images(reference_dir, args.data_root)
+    # Prepare reference images
+    if args.reference_dir:
+        reference_dir = args.reference_dir
+        print(f"\nUsing reference images: {reference_dir}")
+    else:
+        print("\nPreparing CIFAR-10 reference images...")
+        save_cifar10_images(reference_dir, args.data_root)
 
     # Generate samples
     print(f"\nGenerating {args.num_samples} samples...")
