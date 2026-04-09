@@ -422,11 +422,13 @@ def get_imagefolder_dataset(data_dir):
 
 
 class CachedLatentDataset(torch.utils.data.Dataset):
-    """Pre-encoded VAE latents loaded from a memory-mapped numpy file."""
+    """Pre-encoded VAE latents loaded from numpy files."""
     def __init__(self, cache_path):
         import numpy as np
-        self.latents = np.load(cache_path + ".latents.npy", mmap_mode="r")
-        self.labels = np.load(cache_path + ".labels.npy", mmap_mode="r")
+        print(f"  Loading latents into RAM...")
+        self.latents = torch.from_numpy(np.load(cache_path + ".latents.npy"))
+        self.labels = torch.from_numpy(np.load(cache_path + ".labels.npy"))
+        print(f"  Loaded {len(self.labels)} latents ({self.latents.nbytes / 1e9:.1f} GB)")
 
     def __len__(self):
         return len(self.labels)
