@@ -434,7 +434,7 @@ class CachedLatentDataset(torch.utils.data.Dataset):
         return len(self.labels)
 
     def __getitem__(self, idx):
-        return torch.from_numpy(self.latents[idx].copy()), int(self.labels[idx])
+        return self.latents[idx], self.labels[idx]
 
 
 def cache_vae_latents(dataset, vae, vae_scale, device, cache_path, batch_size=32):
