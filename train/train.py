@@ -602,6 +602,7 @@ def train(args):
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Training loop
+    model = torch.compile(model)
     model.train()
     global_step = 0
     use_amp = device.type == "cuda"
