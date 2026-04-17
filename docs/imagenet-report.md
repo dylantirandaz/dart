@@ -11,12 +11,12 @@ This is the paper's actual evaluation dataset. Everything before this (CIFAR-10,
 
 Two full runs on ImageNet have now been completed at different scales.
 
-| Run | Steps | Batch | T | Classes | Infra | FID |
-|-----|-------|-------|---|---------|-------|-----|
-| Run 1 | 200K | 8 | 4 | 941 | Local RTX 4080 | 154.90 |
-| Run 2 | 800K | 32 | 8 | 1000 | Modal A100 | **140.63** |
+| Run | Steps | Batch | T | Classes | Infra | FID (CFG=1.5) | FID (CFG=2.5) |
+|-----|-------|-------|---|---------|-------|---------------|---------------|
+| Run 1 | 200K | 8 | 4 | 941 | Local RTX 4080 | 154.90 | — |
+| Run 2 | 800K | 32 | 8 | 1000 | Modal A100 | 140.63 | **97.90** |
 
-Run 2 improved FID by ~14 points by scaling up the three most obvious levers: 4x more gradient steps, 4x batch size, 2x denoising steps, and covering the full 1000 classes.
+Run 2 improved FID at CFG=1.5 by ~14 points over Run 1, and a further ~43 points by tuning CFG to 2.5 — the single biggest jump from any change in this project.
 
 ## Run 2: Cloud Training (800K steps)
 
@@ -49,13 +49,20 @@ The model is 25x smaller and uses 2x fewer denoising steps. This isn't trying to
 
 ### FID
 
-**FID 140.63** at CFG=1.5, computed with 50K generated samples against 50K ImageNet reference images (streamed from HuggingFace). Standard evaluation protocol.
+Computed with 50K generated samples against 50K ImageNet reference images (streamed from HuggingFace). Standard evaluation protocol.
+
+| CFG scale | FID |
+|-----------|-----|
+| 1.5       | 140.63 |
+| 2.5       | **97.90** |
+
+CFG=2.5 cut FID by ~30% over CFG=1.5 — a much bigger win than a quarter of training steps would buy. Stronger classifier-free guidance trades sample diversity for class fidelity, which the Inception features reward heavily.
 
 For context:
 - Paper's DART-XL (812M, T=16): **3.98 FID**
-- This implementation DART-S (32M, T=8, 800K steps): **140.63 FID**
+- This implementation DART-S (32M, T=8, 800K steps, CFG=2.5): **97.90 FID**
 
-The gap is expected. FID is exponentially sensitive to model capacity and denoising steps. The score confirms the model generates class-conditioned images (random noise scores >300), and the architecture scales in the right direction: doubling T, quadrupling batch, and 4x'ing steps gave a ~9% FID reduction.
+The gap is still large (25x fewer params, half the denoising steps), but the architecture scales in the right direction: every lever pulled (batch, T, steps, CFG) improves the score.
 
 ### Sample Progression
 
