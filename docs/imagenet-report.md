@@ -57,6 +57,24 @@ For context:
 
 The gap is expected. FID is exponentially sensitive to model capacity and denoising steps. The score confirms the model generates class-conditioned images (random noise scores >300), and the architecture scales in the right direction: doubling T, quadrupling batch, and 4x'ing steps gave a ~9% FID reduction.
 
+### Samples
+
+Single samples pulled from the 50K FID set, one per class across a spread of categories (animals, objects, food, flowers). All generated at CFG=1.5, T=8, from the step 800K EMA checkpoint.
+
+| Class | Sample |
+|-------|--------|
+| 0 — tench | ![tench](samples/imagenet_800k/class000_tench.png) |
+| 9 — ostrich | ![ostrich](samples/imagenet_800k/class009_ostrich.png) |
+| 107 — jellyfish | ![jellyfish](samples/imagenet_800k/class107_jellyfish.png) |
+| 207 — golden retriever | ![golden retriever](samples/imagenet_800k/class207_golden_retriever.png) |
+| 281 — tabby cat | ![tabby cat](samples/imagenet_800k/class281_tabby_cat.png) |
+| 291 — lion | ![lion](samples/imagenet_800k/class291_lion.png) |
+| 340 — zebra | ![zebra](samples/imagenet_800k/class340_zebra.png) |
+| 388 — panda | ![panda](samples/imagenet_800k/class388_panda.png) |
+| 817 — sports car | ![sports car](samples/imagenet_800k/class817_sports_car.png) |
+| 963 — pizza | ![pizza](samples/imagenet_800k/class963_pizza.png) |
+| 985 — daisy | ![daisy](samples/imagenet_800k/class985_daisy.png) |
+
 ## Run 1: Local Training (200K steps)
 
 ### Configuration
