@@ -112,5 +112,5 @@ Fix: changed `register_buffer("inv_freq", ...)` to a plain attribute `self.inv_f
 1. Run 3 (in progress): 3D RoPE + uniform loss weighting
 2. Train on Food-101 or Flowers-102 for native high-res images
 3. Experiment with T=8 for finer denoising
-4. FID evaluation (script ready at eval/fid.py)
+4. FID evaluation (now in train_cloud.py::fid_eval)
 5. KV-cache for faster sampling

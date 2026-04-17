@@ -44,25 +44,34 @@ The generate command will:
 3. Download and run the SD v1.4 VAE decoder to convert latents to pixels
 4. Save PNG images to the output directory
 
-## Training (Python)
+## Training (Modal)
 
-Training uses PyTorch for its mature ecosystem. Weights export to safetensors for Rust inference.
+Training runs on [Modal](https://modal.com) with an A100, streaming ImageNet from HuggingFace. Weights export to safetensors for Rust inference.
 
 ```bash
-pip install -r train/requirements.txt
+pip install modal
+modal setup
 
-# Train DART-S on an image folder (testing)
-python train/train.py --size small --data-dir /path/to/images --epochs 50
+# Train DART-S on ImageNet (resumable across 24h function timeouts)
+modal run --detach train_cloud.py
 
-# Train DART-XL on ImageNet (full paper recipe, needs GPU)
-python train/train.py --size xlarge --data-dir /path/to/imagenet --steps 500000
+# Compute FID against 50K ImageNet reference images
+modal run --detach train_cloud.py::fid_eval --cfg-scale 1.5
 
-# Weights are saved to checkpoints/dart_{size}_step{N}.safetensors
-# Then use with Rust inference:
-cargo run -- generate --weights checkpoints/dart_small_step50000.safetensors --class 207
+# Generate a sample grid from a specific checkpoint
+modal run train_cloud.py::sample_grid --checkpoint dart_small_step800000.safetensors
+
+# Download the final checkpoint to use with Rust inference
+modal volume get --force dart-data checkpoints/dart_small_step800000.safetensors ./dart_small.safetensors
 ```
 
-Training details (§B.2): AdamW (lr=3e-4, betas=0.9/0.95), cosine LR with 10k warmup, gradient clip 2.0, EMA decay 0.9999, bf16 mixed precision.
+Training details (§B.2): AdamW (lr=3e-4, betas=0.9/0.95), cosine LR with 10K warmup, gradient clip 2.0, EMA decay 0.9999, bf16 mixed precision. Checkpoints persist on a Modal volume so timeouts and restarts don't lose work.
+
+If your safetensors checkpoint was saved from a `torch.compile`d model, strip the `_orig_mod.` prefix before loading in Rust:
+
+```bash
+python scripts/strip_compile_prefix.py raw_ckpt.safetensors dart_small.safetensors
+```
 
 ## Project Structure
 
@@ -79,9 +88,9 @@ src/                        # Rust inference engine
     ├── schedule.rs         # Cosine noise schedule, v-prediction
     └── sampling.rs         # Non-Markovian sampling loop with CFG
 
-train/                      # Python training
-├── train.py                # Full training script with VAE encoding, EMA, safetensors export
-└── requirements.txt
+train_cloud.py              # Modal app: training, FID eval, sample grids
+train/train.py              # DART model definitions (imported by train_cloud.py)
+scripts/strip_compile_prefix.py  # Utility to clean torch.compile'd checkpoints
 ```
 
 ## Paper Reference
