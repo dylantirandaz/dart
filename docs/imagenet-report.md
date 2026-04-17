@@ -57,6 +57,46 @@ For context:
 
 The gap is expected. FID is exponentially sensitive to model capacity and denoising steps. The score confirms the model generates class-conditioned images (random noise scores >300), and the architecture scales in the right direction: doubling T, quadrupling batch, and 4x'ing steps gave a ~9% FID reduction.
 
+### Sample Progression
+
+Each grid shows the same 12 classes generated from different checkpoints along the 800K-step run. All at CFG=1.5, T=8. Classes (reading left to right, top to bottom): tench, ostrich, jellyfish, golden retriever, tabby cat, lion, zebra, panda, sports car, pizza, daisy, goldfish.
+
+#### Step 10,000
+
+![Step 10K](samples/imagenet_800k/progression_step10000.png)
+
+Early in training. Noise textures with class-dependent color distributions — aquatic classes skew blue, mammals skew brown/tan.
+
+#### Step 50,000
+
+![Step 50K](samples/imagenet_800k/progression_step50000.png)
+
+Coarse structure emerging. Object silhouettes start to form against class-appropriate backgrounds.
+
+#### Step 100,000
+
+![Step 100K](samples/imagenet_800k/progression_step100000.png)
+
+Recognizable shapes for most classes. Zebra stripes, panda head contrast, and car silhouettes appear.
+
+#### Step 200,000
+
+![Step 200K](samples/imagenet_800k/progression_step200000.png)
+
+Where the 200K local run ended (Run 1 at FID 154.90). Details sharper, class conditioning strong.
+
+#### Step 400,000
+
+![Step 400K](samples/imagenet_800k/progression_step400000.png)
+
+Halfway through the cloud run. Textures and proportions continue to refine, especially on animal faces.
+
+#### Step 800,000
+
+![Step 800K](samples/imagenet_800k/progression_step800000.png)
+
+Final checkpoint. FID 140.63. The ceiling for this model size — further gains need more params and more denoising steps.
+
 ### Samples
 
 Single samples pulled from the 50K FID set, one per class across a spread of categories (animals, objects, food, flowers). All generated at CFG=1.5, T=8, from the step 800K EMA checkpoint.

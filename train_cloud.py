@@ -397,6 +397,72 @@ def train(
 
 @app.function(
     gpu="A100",
+    image=image,
+    volumes={VOLUME_PATH: volume},
+    timeout=3600,
+)
+def sample_grid(
+    checkpoint: str = "dart_small_step800000.safetensors",
+    classes: str = "0,9,107,207,281,291,340,388,817,963,985,1",
+    cfg_scale: float = 1.5,
+    num_steps_t: int = 8,
+    size: str = "small",
+    grid_cols: int = 4,
+):
+    """Generate a grid of samples for fixed classes from a specific checkpoint."""
+    import sys
+    sys.path.insert(0, "/data/code")
+
+    import torch
+    from torchvision.utils import make_grid, save_image
+    from diffusers import AutoencoderKL
+    from safetensors.torch import load_file
+
+    from train.train import (
+        DartModel, CONFIGS, CosineSchedule,
+        NUM_TOKENS, PATCH_SIZE, VAE_CHANNELS,
+        sample, unpatchify,
+    )
+
+    device = torch.device("cuda")
+    cfg = CONFIGS[size]
+    num_classes = 1000
+
+    ckpt_path = os.path.join(CHECKPOINT_DIR, checkpoint)
+    print(f"Loading {ckpt_path}")
+    state_dict = load_file(ckpt_path, device=str(device))
+    state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+
+    model = DartModel(cfg, num_steps=num_steps_t, num_classes=num_classes).to(device)
+    model.load_state_dict(state_dict, strict=False)
+    model.eval()
+
+    vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to(device).eval()
+    vae_scale = 0.18215
+    schedule = CosineSchedule(num_steps_t)
+
+    class_list = [int(c) for c in classes.split(",")]
+    class_ids = torch.tensor(class_list, dtype=torch.long, device=device)
+
+    with torch.no_grad():
+        patches = sample(model, schedule, num_classes, num_steps_t,
+                         NUM_TOKENS, class_ids, cfg_scale, device)
+        latents = unpatchify(patches, PATCH_SIZE, VAE_CHANNELS) / vae_scale
+        pixels = vae.decode(latents).sample
+    pixels = ((pixels + 1) / 2).clamp(0, 1)
+
+    grid = make_grid(pixels.cpu(), nrow=grid_cols, padding=2)
+    out_dir = os.path.join(VOLUME_PATH, "sample_grids")
+    os.makedirs(out_dir, exist_ok=True)
+    tag = checkpoint.replace(".safetensors", "")
+    out_path = os.path.join(out_dir, f"{tag}_cfg{cfg_scale}.png")
+    save_image(grid, out_path)
+    volume.commit()
+    print(f"Saved grid to {out_path}")
+
+
+@app.function(
+    gpu="A100",
     image=image.pip_install("clean-fid"),
     volumes={VOLUME_PATH: volume},
     timeout=86400,
