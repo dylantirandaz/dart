@@ -118,6 +118,18 @@ def compute_fid(generated_dir, reference_dir):
     return score
 
 
+def compute_fid_builtin(generated_dir, dataset_name, dataset_res, dataset_split):
+    """Compute FID using clean-fid's precomputed reference statistics."""
+    from cleanfid import fid
+
+    return fid.compute_fid(
+        generated_dir,
+        dataset_name=dataset_name,
+        dataset_res=dataset_res,
+        dataset_split=dataset_split,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Compute FID for DART model on CIFAR-10")
     parser.add_argument("--weights", type=str, required=True,
@@ -138,6 +150,9 @@ def main():
                         help="Directory to save generated images (default: temp dir)")
     parser.add_argument("--reference-dir", type=str, default=None,
                         help="Directory of reference images for FID (default: CIFAR-10)")
+    parser.add_argument("--builtin-ref", type=str, default=None,
+                        choices=["cifar10", "imagenet"],
+                        help="Use clean-fid's precomputed reference stats (e.g. 'imagenet')")
     parser.add_argument("--data-root", type=str, default="./data",
                         help="Root directory for CIFAR-10 download (default: ./data)")
     args = parser.parse_args()
@@ -183,8 +198,10 @@ def main():
 
     reference_dir = os.path.join(args.data_root, "cifar10_fid_ref")
 
-    # Prepare reference images
-    if args.reference_dir:
+    # Prepare reference images (skip if using builtin stats)
+    if args.builtin_ref:
+        print(f"\nUsing clean-fid builtin reference: {args.builtin_ref}")
+    elif args.reference_dir:
         reference_dir = args.reference_dir
         print(f"\nUsing reference images: {reference_dir}")
     else:
@@ -201,7 +218,12 @@ def main():
 
     # Compute FID
     print("\nComputing FID...")
-    fid_score = compute_fid(generated_dir, reference_dir)
+    if args.builtin_ref == "imagenet":
+        fid_score = compute_fid_builtin(generated_dir, "imagenet", 256, "trainval")
+    elif args.builtin_ref == "cifar10":
+        fid_score = compute_fid_builtin(generated_dir, "cifar10", 32, "train")
+    else:
+        fid_score = compute_fid(generated_dir, reference_dir)
     print(f"\n{'='*40}")
     print(f"FID Score: {fid_score:.2f}")
     print(f"{'='*40}")

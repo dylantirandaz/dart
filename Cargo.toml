@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "DART: Denoising Autoregressive Transformer for Scalable Text-to-Image Generation"
 
+[features]
+default = []
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+
 [dependencies]
 candle-core = "0.8"
 candle-nn = "0.8"

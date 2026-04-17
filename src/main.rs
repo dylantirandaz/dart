@@ -130,9 +130,10 @@ fn main() -> Result<()> {
         } => {
             let mut config = get_config(&model_size, steps)?;
             config.num_classes = num_classes;
-            let device = Device::Cpu;
+            let device = Device::cuda_if_available(0)?;
 
             println!("DART Generation");
+            println!("  Device:    {}", if device.is_cuda() { "CUDA (GPU)" } else { "CPU" });
             println!("  Model:     {model_size} (~{}M params)", config.num_params_m);
             println!("  Class:     {class}");
             println!("  Steps:     {steps}");

@@ -4,3 +4,7 @@
 *.pt
 *.ckpt
 __pycache__/
+/output/
+/cloud_checkpoints/
+/samples_cfg*
+/.claude/
