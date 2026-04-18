@@ -56,8 +56,9 @@ Computed with 50K generated samples against 50K ImageNet reference images (strea
 | 1.5       | 140.63 |
 | 2.5       | 97.90 |
 | 4.0       | **85.08** |
+| 6.0       | 85.17 |
 
-FID drops monotonically as CFG rises through this range, so the peak hasn't been found yet — but the improvement rate is slowing, suggesting we're near it. Stronger classifier-free guidance trades sample diversity for class fidelity, which Inception features reward heavily.
+Classic CFG curve — monotone drop through 4.0, then plateau. CFG=4.0 and CFG=6.0 are a rounding error apart, so the best FID for this model lives right around 4.0. Stronger classifier-free guidance trades sample diversity for class fidelity, which Inception features reward heavily.
 
 For context:
 - Paper's DART-XL (812M, T=16): **3.98 FID**
