@@ -60,6 +60,18 @@ Computed with 50K generated samples against 50K ImageNet reference images (strea
 
 Classic CFG curve — monotone drop through 4.0, then plateau. CFG=4.0 and CFG=6.0 are a rounding error apart, so the best FID for this model lives right around 4.0. Stronger classifier-free guidance trades sample diversity for class fidelity, which Inception features reward heavily.
 
+### CFG Comparison (visual)
+
+Same seed, same checkpoint, different guidance scales. Three classes shown: golden retriever (207), zebra (340), pizza (963).
+
+| Class | CFG=1.5 | CFG=2.5 | CFG=4.0 | CFG=6.0 |
+|-------|---------|---------|---------|---------|
+| 207 — golden retriever | ![](samples/imagenet_800k/cfg_compare/class207_cfg1.5.png) | ![](samples/imagenet_800k/cfg_compare/class207_cfg2.5.png) | ![](samples/imagenet_800k/cfg_compare/class207_cfg4.0.png) | ![](samples/imagenet_800k/cfg_compare/class207_cfg6.0.png) |
+| 340 — zebra | ![](samples/imagenet_800k/cfg_compare/class340_cfg1.5.png) | ![](samples/imagenet_800k/cfg_compare/class340_cfg2.5.png) | ![](samples/imagenet_800k/cfg_compare/class340_cfg4.0.png) | ![](samples/imagenet_800k/cfg_compare/class340_cfg6.0.png) |
+| 963 — pizza | ![](samples/imagenet_800k/cfg_compare/class963_cfg1.5.png) | ![](samples/imagenet_800k/cfg_compare/class963_cfg2.5.png) | ![](samples/imagenet_800k/cfg_compare/class963_cfg4.0.png) | ![](samples/imagenet_800k/cfg_compare/class963_cfg6.0.png) |
+
+At low CFG (1.5) the samples are softer and more varied in composition; at high CFG (4.0–6.0) class-defining features (dog face, zebra stripes, pizza toppings) sharpen and saturate. CFG=4.0 is where that trade pays off for FID, and CFG=6.0 starts pushing toward over-saturation without further benefit.
+
 For context:
 - Paper's DART-XL (812M, T=16): **3.98 FID**
 - This implementation DART-S (32M, T=8, 800K steps, CFG=4.0): **85.08 FID**
